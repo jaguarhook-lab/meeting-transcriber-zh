@@ -1,0 +1,18 @@
+# 個人／機敏資料：不上傳
+對照表.tsv
+對照表_打包前備份_*.tsv
+情境說明.txt
+設定.json
+
+# 打包產物與暫存
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+_舊版/
+_工作檔/
+models/
+*.wav
+*.m4a
+*.mp3

@@ -1,0 +1,8 @@
+faster-whisper>=1.2.1
+opencc-python-reimplemented>=0.1.7
+markdown>=3.5
+requests>=2.31
+huggingface_hub>=0.24
+numpy>=1.26
+# 打包用
+pyinstaller>=6.10
