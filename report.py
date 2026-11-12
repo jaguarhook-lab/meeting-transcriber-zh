@@ -116,12 +116,25 @@ def _context(words: list, confirmed: list = ()) -> str:
     return "\n\n".join(out) + ("\n" if out else "")
 
 
-def split_minutes(md: str) -> tuple[str, str]:
-    """拆成（正式記錄, 待確認清單）。AI 沒照格式輸出分隔線時，全部當正式記錄。"""
-    if SPLIT in md:
-        main, pend = md.split(SPLIT, 1)
-        return _clean(main), _clean(pend)
-    return _clean(md), ""
+def split_minutes(md: str) -> tuple[str, str, str]:
+    """拆成（正式記錄, 待確認清單, 問題說明）。
+    分隔線必須單獨成一行、恰好出現一次，且前後兩部分都不能是空的；不符合時「問題說明」不是空字串，
+    正式記錄放 AI 回覆中可用的部分（沒有分隔線時是全部內容），由呼叫端決定不產生 PDF、請使用者檢查。"""
+    lines = md.splitlines()
+    idx = [i for i, l in enumerate(lines) if l.strip() == SPLIT]
+    if len(idx) != 1:
+        if SPLIT in md:
+            problem = f"分隔線「{SPLIT}」沒有單獨成行或出現 {md.count(SPLIT)} 次"
+        else:
+            problem = f"沒有分隔線「{SPLIT}」，待確認清單可能混在正式記錄裡"
+        return _clean(md.replace(SPLIT, "")), "", problem
+    main = "\n".join(lines[:idx[0]]).strip()
+    pend = "\n".join(lines[idx[0] + 1:]).strip()
+    if not main:
+        return "", _clean(pend) if pend else "", "分隔線前面沒有正式記錄"
+    if not pend:
+        return _clean(main), "", "分隔線後面沒有待確認清單"
+    return _clean(main), _clean(pend), ""
 
 
 def minutes(name: str, audio: str, transcript_name: str, text: str, pending: list, topic: str, log,

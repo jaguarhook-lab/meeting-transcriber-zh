@@ -15,6 +15,7 @@ import traceback
 import webbrowser
 import winsound
 from pathlib import Path
+from types import SimpleNamespace
 from tkinter import filedialog, messagebox, ttk
 
 import ai_engines
@@ -125,10 +126,12 @@ class App:
             w.pack(side="left", padx=(0, 8))
         b2 = ttk.Frame(f)
         b2.grid(row=8, column=0, columnspan=3, sticky="ew")
-        ttk.Button(b2, text="重新產生 PDF（編輯 md 之後）", command=self.regen_pdf).pack(side="left", padx=(0, 8))
+        self.btn_regen = ttk.Button(b2, text="重新產生 PDF（編輯 md 之後）", command=self.regen_pdf)
+        self.btn_regen.pack(side="left", padx=(0, 8))
         ttk.Button(b2, text="開啟輸出資料夾", command=self.open_out).pack(side="left")
         ttk.Button(b2, text="編輯已知名詞", command=self.edit_known).pack(side="left", padx=(8, 0))
-        ttk.Button(b2, text="從我的修改學習", command=self.open_learn).pack(side="left", padx=(8, 0))
+        self.btn_learn = ttk.Button(b2, text="從我的修改學習", command=self.open_learn)
+        self.btn_learn.pack(side="left", padx=(8, 0))
 
         self.pb = ttk.Progressbar(f, maximum=1000)
         self.pb.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(10, 2))
@@ -194,25 +197,37 @@ class App:
         if not busy:
             self.step = ""
         st = "disabled" if busy else "normal"
-        for w in (self.btn_run, self.btn_fix, self.btn_rep):
+        for w in (self.btn_run, self.btn_fix, self.btn_rep, self.btn_regen, self.btn_learn):
             w.configure(state=st)
         self.btn_stop.configure(state="normal" if busy else "disabled")
 
-    def run_bg(self, fn, retry=None):
-        """背景執行；遇到使用上限時顯示通知，retry 為「改用另一個 AI 重試」時要再呼叫的函式。"""
+    def run_bg(self, fn, retry=None) -> bool:
+        """背景執行（一次只能有一個工作）；遇到使用上限時顯示通知，retry 為「改用另一個 AI 重試」時要再呼叫的函式。
+        回傳是否有啟動。"""
+        if self.busy:
+            messagebox.showwarning("目前有工作進行中", f"目前有工作進行中{f'（{self.step}）' if self.step else ''}，請等它完成再試。")
+            return False
+        self.job_id = jid = getattr(self, "job_id", 0) + 1
+
+        def done_busy():
+            if self.job_id == jid:  # 只有自己這個工作還是最新的，才解除忙碌（避免清掉後來啟動的新工作）
+                self.set_busy(False)
+
         def wrap():
             try:
                 fn()
             except ai_engines.LimitError as e:
+                self.ui(done_busy)  # 先解除忙碌，「改用另一個 AI 重試」才能啟動新工作
                 self.ui(lambda e=e: self.handle_limit(e, retry))  # e=e：except 結束後 e 會被刪除，要先綁定
             except Exception as e:
                 self.log("錯誤：" + str(e))
                 self.log(traceback.format_exc(limit=2))
                 self.ui(lambda msg=str(e): messagebox.showerror("錯誤", msg))
             finally:
-                self.ui(lambda: self.set_busy(False))
+                self.ui(done_busy)
         self.set_busy(True)
         threading.Thread(target=wrap, daemon=True).start()
+        return True
 
     def save_pref(self):
         self.settings.update(engine=self.engine, language=self.v_lang.get())
@@ -368,17 +383,23 @@ class App:
     def workdir(self) -> Path:
         return self.outdir / "_工作檔" / self.name
 
-    def state(self) -> dict:
+    def ctx(self) -> SimpleNamespace:
+        """在主執行緒擷取本次工作的會議名稱、輸出資料夾、工作資料夾。
+        背景工作與子視窗只用這份快照，執行中修改畫面上的欄位不會影響正在進行的工作。"""
+        return SimpleNamespace(name=self.name, outdir=self.outdir, workdir=self.workdir)
+
+    def state(self, wd: Path = None) -> dict:
         try:
-            return json.loads((self.workdir / "state.json").read_text(encoding="utf-8"))
+            return json.loads(((wd or self.workdir) / "state.json").read_text(encoding="utf-8"))
         except Exception:
             return {}
 
-    def save_state(self, **kw):
-        s = self.state()
+    def save_state(self, wd: Path = None, **kw):
+        wd = wd or self.workdir
+        s = self.state(wd)
         s.update(kw)
-        self.workdir.mkdir(parents=True, exist_ok=True)
-        (self.workdir / "state.json").write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+        wd.mkdir(parents=True, exist_ok=True)
+        (wd / "state.json").write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
 
     def open_out(self):
         if self.v_out.get() and Path(self.v_out.get()).exists():
@@ -415,7 +436,17 @@ class App:
             if not p:
                 return
             edited = Path(p)
-        items, skipped = learn.diff_edits(orig.read_text(encoding="utf-8"), edited.read_text(encoding="utf-8"))
+        try:
+            if max(orig.stat().st_size, edited.stat().st_size) > 1024 * 1024:
+                messagebox.showwarning("檔案太大", "會議記錄超過 1 MB，比對可能很久，請確認選的是會議記錄 md。")
+                return
+            a_text, b_text = orig.read_text(encoding="utf-8"), edited.read_text(encoding="utf-8")
+            pp = Path(st.get("minutes_pending", "")) if st.get("minutes_pending") else None
+            pend = learn.pending_words(pp.read_text(encoding="utf-8")) if pp and pp.exists() else set()
+            items, skipped = learn.diff_edits(a_text, b_text, pend)
+        except Exception as e:
+            messagebox.showerror("無法比對", f"讀取或比對失敗：{e}\n\n請確認檔案存在、沒有被其他程式鎖住，且是 UTF-8 文字檔。")
+            return
         # 已經學過的（已知名詞已有、且誤寫已記錄）不再列
         known = {e["詞"]: e for e in load_known_entries()}
         items = [it for it in items
@@ -445,14 +476,18 @@ class App:
         if not self.model_path:
             messagebox.showwarning("沒有語音模型", "請先按「下載模型」或「選擇模型資料夾」。")
             return
+        if self.busy:
+            self.run_bg(None)  # 顯示「目前有工作進行中」
+            return
         self.cancel.clear()
-        audio, wd, mp, lang = Path(self.v_audio.get()), self.workdir, self.model_path, self.v_lang.get()
-        st = self.state()
+        c = self.ctx()
+        audio, wd, mp, lang = Path(self.v_audio.get()), c.workdir, self.model_path, self.v_lang.get()
+        st = self.state(wd)
         if st.get("model") and (st.get("model") != mp or st.get("language") != lang) and (wd / "逐字稿_原始.jsonl").exists():
             if not messagebox.askyesno("設定不同", f"這場會議先前用「{Path(st['model']).name}／{st.get('language')}」辨識到一半，\n"
                                                    f"現在選的是「{Path(mp).name}／{lang}」。\n\n續跑的後半段會用新設定，要繼續嗎？"):
                 return
-        self.save_state(audio=str(audio), model=mp, language=lang)
+        self.save_state(wd, audio=str(audio), model=mp, language=lang)
 
         def job():
             self.set_step("語音辨識中")
@@ -460,24 +495,31 @@ class App:
                                   model_dir=mp, language=lang)
             if not self.cancel.is_set() and rows:
                 self.log("辨識完成，開啟校正畫面…")
-                self.ui(self.open_fix)
+                self.ui(lambda: self.open_fix(c))
         self.run_bg(job)
 
     # ---------- ② 校正 ----------
-    def open_fix(self):
-        if not self.check_paths(need_audio=False):
-            return
-        rows = asr.read_rows(self.workdir / "逐字稿_原始.jsonl")
+    def open_fix(self, c: SimpleNamespace = None):
+        if c is None:
+            if not self.check_paths(need_audio=False):
+                return
+            c = self.ctx()
+        rows = asr.read_rows(c.workdir / "逐字稿_原始.jsonl")
         if not rows:
-            messagebox.showwarning("沒有逐字稿", f"找不到「{self.name}」的辨識結果，請先按「① 開始辨識」。\n（會議名稱要跟辨識時相同）")
+            messagebox.showwarning("沒有逐字稿", f"找不到「{c.name}」的辨識結果，請先按「① 開始辨識」。\n（會議名稱要跟辨識時相同）")
             return
-        FixWindow(self, rows)
+        FixWindow(self, rows, c)
 
     # ---------- ③ 會議記錄 ----------
-    def start_report(self):
-        if not self.check_paths(need_audio=False):
+    def start_report(self, c: SimpleNamespace = None):
+        if c is None:
+            if not self.check_paths(need_audio=False):
+                return
+            c = self.ctx()
+        if self.busy:
+            self.run_bg(None)  # 顯示「目前有工作進行中」
             return
-        st = self.state()
+        st = self.state(c.workdir)
         tp = Path(st.get("transcript", ""))
         if not st.get("transcript") or not tp.exists():
             messagebox.showwarning("尚未校正", "請先完成「② 校正專有名詞」並按「套用並存檔」。")
@@ -486,7 +528,7 @@ class App:
         if not ai_engines.find(engine):
             messagebox.showerror(f"找不到 {engine}", f"這台電腦找不到 {engine}，請按「安裝說明」，或改選另一個 AI。")
             return
-        name, topic = self.name, self.v_topic.get().strip()
+        name, topic = c.name, self.v_topic.get().strip()
         audio_name = Path(st.get("audio", "")).name
         pending = st.get("pending", [])
         confirmed = st.get("confirmed", [])
@@ -503,61 +545,93 @@ class App:
 
         def job():
             text = tp.read_text(encoding="utf-8")
-            done = {} if redo else self.state()
+            if not text.strip():
+                raise RuntimeError(f"逐字稿是空的：{tp.name}，請先完成辨識與校正。")
+            done = {} if redo else self.state(c.workdir)
+            problem = ""
+            pend_name = ""
             if not (done.get("minutes_md") and Path(done["minutes_md"]).exists() and done.get("minutes_for") == str(tp)):
                 self.set_step(f"{engine} 整理會議記錄中")
                 raw = report.minutes(name, audio_name, tp.name, text, pending, topic, self.log, engine, confirmed)
-                md, pend_md = report.split_minutes(raw)
-                mdp = unique_path(self.outdir / f"{name}_會議記錄.md")
+                # AI 完整回覆另存在工作檔，拆檔失敗時可以檢查
+                rawp = unique_path(c.workdir / "會議記錄_AI回覆.md")
+                rawp.write_text(raw, encoding="utf-8")
+                md, pend_md, problem = report.split_minutes(raw)
+                if not md.strip():
+                    raise RuntimeError(f"{engine} 的回覆沒有正式記錄內容（{problem}）。完整回覆在：{rawp}")
+                mdp = unique_path(c.outdir / f"{name}_會議記錄.md")
                 mdp.write_text(md, encoding="utf-8")
                 # AI 原稿另存在工作檔（之後使用者編輯 md 不影響），供「從我的修改學習」比對
-                orig = unique_path(self.workdir / "會議記錄_AI原稿.md")
+                orig = unique_path(c.workdir / "會議記錄_AI原稿.md")
                 orig.write_text(md, encoding="utf-8")
-                self.save_state(minutes_md=str(mdp), minutes_for=str(tp), minutes_engine=engine, minutes_ai=str(orig))
+                self.save_state(c.workdir, minutes_md=str(mdp), minutes_for=str(tp), minutes_engine=engine,
+                                minutes_ai=str(orig), minutes_raw=str(rawp), minutes_pending="", minutes_pdf="")
                 self.log(f"{engine} 已完成：{mdp.name}")
                 if pend_md:
-                    pp = unique_path(self.outdir / f"{name}_待確認.md")
+                    pp = unique_path(c.outdir / f"{name}_待確認.md")
                     pp.write_text(pend_md, encoding="utf-8")
+                    pend_name = pp.name
+                    self.save_state(c.workdir, minutes_pending=str(pp))
                     self.log(f"待確認清單：{pp.name}（不轉 PDF）")
+                if problem:
+                    # 格式不對：待確認內容可能混在正式記錄裡，先不產生正式 PDF，請使用者檢查
+                    self.log(f"注意：{engine} 的回覆格式不符（{problem}），這次不產生 PDF。"
+                             f"請檢查 {mdp.name}（完整回覆在 {rawp}），整理好後按「重新產生 PDF」。")
                 else:
-                    self.log(f"注意：{engine} 沒有輸出待確認清單（分隔線不見），全部內容都放在 {mdp.name}。")
-                self.set_step("會議記錄轉 PDF 中")
-                pdfp = pdf.md_to_pdf(mdp, unique_path(mdp.with_suffix(".pdf")))
-                self.log(f"PDF 已產生：{pdfp.name}")
+                    self.set_step("會議記錄轉 PDF 中")
+                    pdfp = pdf.md_to_pdf(mdp, unique_path(mdp.with_suffix(".pdf")))
+                    self.save_state(c.workdir, minutes_pdf=str(pdfp))
+                    self.log(f"PDF 已產生：{pdfp.name}")
             if topic and not (done.get("topic_md") and Path(done["topic_md"]).exists() and done.get("topic_for") == f"{tp}|{topic}"):
                 self.set_step(f"{engine} 整理專題中")
                 md2 = report.topic_report(name, topic, text, pending, self.log, engine, confirmed)
-                tpm = unique_path(self.outdir / f"{name}_{safe_name(topic)}_專題整理.md")
+                tpm = unique_path(c.outdir / f"{name}_{safe_name(topic)}_專題整理.md")
                 tpm.write_text(md2, encoding="utf-8")
-                self.save_state(topic_md=str(tpm), topic_for=f"{tp}|{topic}", topic_engine=engine)
+                self.save_state(c.workdir, topic_md=str(tpm), topic_for=f"{tp}|{topic}", topic_engine=engine, topic_pdf="")
                 self.log(f"{engine} 已完成：{tpm.name}")
                 self.set_step("專題轉 PDF 中")
                 tpp = pdf.md_to_pdf(tpm, unique_path(tpm.with_suffix(".pdf")))
+                self.save_state(c.workdir, topic_pdf=str(tpp))
                 self.log(f"PDF 已產生：{tpp.name}")
-            self.log("完成。請對照「_待確認.md」修改會議記錄 md，再按「重新產生 PDF」；改完可按「從我的修改學習」。")
-            self.ui(lambda: messagebox.showinfo("完成", f"會議記錄已產生（{engine}）。\n無法確認的詞列在「{name}_待確認.md」，\n"
+            if problem:
+                self.ui(lambda: messagebox.showwarning(
+                    "請檢查會議記錄", f"{engine} 的回覆格式不符（{problem}），這次沒有產生 PDF。\n"
+                                     "待確認的內容可能混在會議記錄 md 裡，請檢查整理後按「重新產生 PDF」。"))
+                return
+            self.log("完成。請對照待確認清單修改會議記錄 md，再按「重新產生 PDF」；改完可按「從我的修改學習」。")
+            where = f"「{pend_name}」" if pend_name else "待確認清單"
+            self.ui(lambda: messagebox.showinfo("完成", f"會議記錄已產生（{engine}）。\n無法確認的詞列在{where}，\n"
                                                         "可直接編輯會議記錄 md 後按「重新產生 PDF」。\n"
                                                         "改完後按「從我的修改學習」，下次就不用再改同樣的錯。"))
-        self.run_bg(job, retry=self.start_report)
+        self.run_bg(job, retry=lambda: self.start_report(c))  # 改用另一個 AI 重試時，仍是同一場會議
 
     def regen_pdf(self):
         if not self.v_out.get():
             messagebox.showwarning("缺少輸出資料夾", "請先選擇輸出資料夾。")
             return
-        st = self.state()
-        mds = [Path(st[k]) for k in ("minutes_md", "topic_md") if st.get(k) and Path(st[k]).exists()]
+        if self.busy:
+            self.run_bg(None)  # 顯示「目前有工作進行中」
+            return
+        c = self.ctx()
+        st = self.state(c.workdir)
+        # (md 路徑, 狀態檔中記錄 PDF 的欄位)
+        mds = [(Path(st[k]), pk) for k, pk in (("minutes_md", "minutes_pdf"), ("topic_md", "topic_pdf"))
+               if st.get(k) and Path(st[k]).exists()]
         if not mds:
-            picked = filedialog.askopenfilenames(title="選擇要轉成 PDF 的 md", initialdir=self.v_out.get(),
+            picked = filedialog.askopenfilenames(title="選擇要轉成 PDF 的 md", initialdir=str(c.outdir),
                                                  filetypes=[("Markdown", "*.md")])
-            mds = [Path(p) for p in picked]
+            mds = [(Path(p), None) for p in picked]
         if not mds:
             return
 
         def job():
-            for m in mds:
+            for m, pk in mds:
                 self.set_step(f"{m.name} 轉 PDF 中")
-                pdf.md_to_pdf(m, m.with_suffix(".pdf"))
-                self.log(f"已重新產生：{m.with_suffix('.pdf').name}")
+                dst = unique_path(m.with_suffix(".pdf"))  # 不覆蓋：舊 PDF 保留，新版另存 (2)、(3)…
+                pdf.md_to_pdf(m, dst)
+                if pk:
+                    self.save_state(c.workdir, **{pk: str(dst)})
+                self.log(f"已產生新版 PDF：{dst.name}（舊版保留）")
         self.run_bg(job)
 
 
@@ -627,15 +701,16 @@ class FixWindow:
     COLS = ("原詞", "改為", "次數", "處理", "加入清單", "類別", "理由")
     ACTIONS = ("替換", "待確認", "不改")
 
-    def __init__(self, app: App, raw_rows: list):
+    def __init__(self, app: App, raw_rows: list, c: SimpleNamespace = None):
         self.app = app
+        self.c = c or app.ctx()  # 這場會議的名稱／輸出／工作資料夾（開窗當下的快照）
         self.raw = raw_rows
         self.pairs = terms.load_glossary() + known_pairs()  # 已知名詞的「常被誤寫成」也一併自動替換
         self.rows, self.gl_counts = terms.apply(raw_rows, self.pairs)
         self.items = []
 
         w = self.win = tk.Toplevel(app.root)
-        w.title(f"② 校正專有名詞 — {app.name}")
+        w.title(f"② 校正專有名詞 — {self.c.name}")
         w.geometry("980x640")
         w.transient(app.root)
         top = ttk.Frame(w, padding=8)
@@ -678,7 +753,7 @@ class FixWindow:
 
         bot = ttk.Frame(w, padding=8)
         bot.pack(fill="x")
-        ttk.Label(bot, text="填了「改為」按更新就會替換；「改為」留空才是「待確認」（不替換，列在會議記錄最後，之後可直接編輯記錄檔）。",
+        ttk.Label(bot, text="填了「改為」按更新就會替換；「改為」留空才是「待確認」（不替換，列在待確認清單 _待確認.md，之後可直接編輯記錄檔）。",
                   foreground="#666").pack(side="left")
         ttk.Button(bot, text="套用並存檔", style="Big.TButton", command=self.apply_save).pack(side="right")
 
@@ -836,7 +911,7 @@ class FixWindow:
             return
         s = self.items[sel[0]]["例句"][0][0]
         try:
-            clip = asr.clip_wav(self.app.workdir, s - 2, s + 10, self.app.workdir / "_播放片段.wav")
+            clip = asr.clip_wav(self.c.workdir, s - 2, s + 10, self.c.workdir / "_播放片段.wav")
             winsound.PlaySound(str(clip), winsound.SND_FILENAME | winsound.SND_ASYNC)
         except Exception as e:
             messagebox.showerror("無法播放", str(e), parent=self.win)
@@ -864,55 +939,58 @@ class FixWindow:
                 self.refresh()
         n_pend = sum(it["處理"] == "待確認" for it in self.items)
         if n_pend and not messagebox.askokcancel(
-                "還有待確認", f"還有 {n_pend} 項「待確認」，這些詞不會替換，會列在會議記錄最後。\n確定存檔？", parent=self.win):
+                "還有待確認", f"還有 {n_pend} 項「待確認」，這些詞不會替換，會列在待確認清單（_待確認.md）。\n確定存檔？", parent=self.win):
             return
         reps =[(it["原詞"], it["建議"]) for it in self.items if it["處理"] == "替換" and it["建議"]]
         pending = [it["原詞"] for it in self.items if it["處理"] == "待確認"]
         rows, counts = terms.apply(self.rows, reps)
-        app = self.app
-        tp = unique_path(app.outdir / f"{app.name}_逐字稿.txt")
+        app, c = self.app, self.c
+        tp = unique_path(c.outdir / f"{c.name}_逐字稿.txt")
         tp.write_text(terms.to_text(rows), encoding="utf-8")
         allc = dict(self.gl_counts)
         allc.update(counts)
-        terms.write_record(app.workdir / "校正紀錄.md", allc, pending)
+        terms.write_record(c.workdir / "校正紀錄.md", allc, pending)
         added = terms.add_to_glossary([(it["原詞"], it["建議"]) for it in self.items if it["加入"] and it["處理"] == "替換"])
         added_known = add_known([it["原詞"] for it in self.items if it["加入"] and it["處理"] == "不改"])
         # 已確認寫法：實際替換過的正確寫法＋選「不改」的詞（不改＝確認原寫法正確），產生記錄時告訴 AI 不必加（?）
-        confirmed = sorted({g for (b, g), c in allc.items() if c} | {it["原詞"] for it in self.items if it["處理"] == "不改"})
-        app.save_state(transcript=str(tp), pending=pending, confirmed=confirmed)
+        confirmed = sorted({g for (b, g), n in allc.items() if n} | {it["原詞"] for it in self.items if it["處理"] == "不改"})
+        app.save_state(c.workdir, transcript=str(tp), pending=pending, confirmed=confirmed)
         winsound.PlaySound(None, 0)
         app.log(f"已存逐字稿：{tp.name}（本次替換 {sum(counts.values())} 處，待確認 {len(pending)} 項，對照表新增 {added} 筆，已知名詞新增 {added_known} 筆）")
         self.win.destroy()
         if ai_engines.find(app.engine) and messagebox.askyesno("下一步", f"逐字稿已存檔。要接著用 {app.engine} 產生會議記錄嗎？"):
-            app.start_report()
+            app.start_report(c)
 
 
 class LearnWindow:
     """從使用者的修改學習：列出 AI 原稿 → 改好的 md 之間改過的詞，勾選加入已知名詞或對照表。"""
-    COLS = ("原寫法", "改為", "次數", "動作", "說明", "前後文（AI 原稿）")
+    COLS = ("原寫法", "改為", "次數", "動作", "說明", "提醒", "前後文（AI 原稿）")
     ACTIONS = ("已知名詞", "只加對照表", "略過")
 
     def __init__(self, app: "App", items: list, skipped: int, orig: Path, edited: Path):
         self.app = app
         for it in items:
-            it.setdefault("動作", "已知名詞")
+            it.setdefault("動作", "略過")  # 預設略過：逐項確認是名詞校正才寫入，避免把內容修訂學成替換規則
             it.setdefault("說明", "")
+            it.setdefault("提醒", "")
         self.items = items
         w = self.win = tk.Toplevel(app.root)
         w.title(f"從我的修改學習 — {edited.name}")
         w.geometry("1000x600")
         w.transient(app.root)
         msg = (f"比對「{orig.name}」→「{edited.name}」，找到 {len(items)} 處改過的詞"
-               + (f"（另有 {skipped} 處較長的改寫未列出）" if skipped else "") + "。")
+               + (f"（數字、日期、純插入與較長的改寫共 {skipped} 處不列出）" if skipped else "") + "。")
         ttk.Label(w, text=msg, font=(FONT, 10, "bold"), padding=8).pack(anchor="w")
         ttk.Label(w, padding=(8, 0), foreground="#666", text=(
+            "全部預設「略過」：請只把「人名、公司名、地名、專有名詞的寫法校正」改成「已知名詞」或「只加對照表」。\n"
             "「已知名詞」：把「改為」記成正確寫法（可填說明，例如職稱、公司關係），原寫法記成它的常見誤寫，下次自動替換。\n"
-            "「只加對照表」：只記錯字 → 正確寫法。原寫法＝改為的列，是你刪掉（?）確認寫法正確的詞。可按住 Ctrl／Shift 多選。")
+            "「只加對照表」：只記錯字 → 正確寫法。原寫法＝改為的列，是你刪掉（?）確認寫法正確的詞。\n"
+            "「提醒」欄有「需確認」的，請先把原寫法、改為修正成完整的詞。可按住 Ctrl／Shift 多選。")
         ).pack(anchor="w")
         mid = ttk.Frame(w, padding=8)
         mid.pack(fill="both", expand=True)
         self.tv = ttk.Treeview(mid, columns=self.COLS, show="headings", selectmode="extended")
-        for c, wd in zip(self.COLS, (120, 120, 45, 80, 200, 380)):
+        for c, wd in zip(self.COLS, (110, 110, 40, 75, 170, 90, 330)):
             self.tv.heading(c, text=c)
             self.tv.column(c, width=wd, anchor="center" if c in ("次數", "動作") else "w")
         sb = ttk.Scrollbar(mid, command=self.tv.yview)
@@ -945,7 +1023,8 @@ class LearnWindow:
     def refresh(self):
         self.tv.delete(*self.tv.get_children())
         for i, it in enumerate(self.items):
-            self.tv.insert("", "end", iid=str(i), values=(it["原"], it["改"], it["次數"], it["動作"], it["說明"], it["前後文"]))
+            self.tv.insert("", "end", iid=str(i), values=(it["原"], it["改"], it["次數"], it["動作"], it["說明"],
+                                                          "⚠ 需確認" if it["提醒"] else "", it["前後文"]))
 
     def selected(self) -> list:
         return [int(i) for i in self.tv.selection()]
@@ -976,7 +1055,10 @@ class LearnWindow:
             if not b:
                 messagebox.showwarning("缺少改為", "「改為」不可空白。", parent=self.win)
                 return
-            self.items[sel[0]]["原"], self.items[sel[0]]["改"] = a or b, b
+            it0 = self.items[sel[0]]
+            if (a or b, b) != (it0["原"], it0["改"]):
+                it0["提醒"] = ""  # 使用者已自行修正成完整的詞
+            it0["原"], it0["改"] = a or b, b
         for i in sel:
             it = self.items[i]
             if self.v_act.get():

@@ -99,17 +99,33 @@ def find_suspects(rows: list, log, engine: str = "Claude Code") -> list:
     m = re.search(r"\[.*\]", out, re.S)
     if not m:
         raise RuntimeError(f"{engine} 回傳的內容不是 JSON：{out[:200]}")
-    items, seen = [], set()
-    for it in json.loads(m.group(0)):
-        w = str(it.get("原詞", "")).strip()
+    try:
+        data = json.loads(m.group(0))
+    except ValueError as e:
+        raise RuntimeError(f"{engine} 回傳的 JSON 格式有誤（{e}）：{out[:200]}")
+    if not isinstance(data, list):
+        raise RuntimeError(f"{engine} 回傳的不是清單：{out[:200]}")
+
+    def text(v) -> str:
+        """只接受字串（數字也可）；null、清單、物件一律視為空白，不讓 "None" 之類的字被當成建議寫法。"""
+        return str(v).strip() if isinstance(v, (str, int, float)) and not isinstance(v, bool) else ""
+
+    items, seen, bad = [], set(), 0
+    for it in data:
+        if not isinstance(it, dict):
+            bad += 1
+            continue
+        w = text(it.get("原詞"))
         if not w or w in seen or w in known:
             continue
         n, ex = occurrences(rows, w)
         if n == 0:
             continue
         seen.add(w)
-        items.append({"原詞": w, "建議": str(it.get("建議", "")).strip(), "類別": it.get("類別", ""),
-                      "理由": it.get("理由", ""), "次數": n, "例句": ex})
+        items.append({"原詞": w, "建議": text(it.get("建議")), "類別": text(it.get("類別")),
+                      "理由": text(it.get("理由")), "次數": n, "例句": ex})
+    if bad:
+        log(f"注意：{engine} 的回覆有 {bad} 筆格式不對，已略過。")
     log(f"{engine} 列出 {len(items)} 個疑問詞")
     return items
 

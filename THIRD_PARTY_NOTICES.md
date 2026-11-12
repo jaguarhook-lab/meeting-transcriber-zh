@@ -1,8 +1,9 @@
 # Third-Party Notices（第三方套件授權聲明）
 
 本程式原始碼以 MIT 授權發布（見 `LICENSE`）。
-Releases 中的打包版（`錄音轉文字.exe` 與 `_internal\`）另外包含下列第三方元件，各依其授權條款散布。
-各元件的完整授權文字可於下列專案網址取得；打包版 `_internal\` 內各 `*.dist-info` 資料夾亦附有原始授權檔。
+本專案只提供原始碼，不散布打包好的執行檔（v1.1.0 起）。
+從原始碼執行或用 `build.py` 自行打包時，會使用下列第三方元件，各依其授權條款使用；自行打包的資料夾 `_internal\` 內各 `*.dist-info` 資料夾附有原始授權檔。
+**若你把自行打包的版本散布給他人**，須自行遵守下列各元件的授權條款（特別是下方 AGPL、LGPL 說明）。
 
 語音模型（Whisper 權重）**不包含**在本程式中，由使用者自行從 Hugging Face 下載（OpenAI Whisper，MIT 授權）。
 
@@ -42,13 +43,14 @@ Releases 中的打包版（`錄音轉文字.exe` 與 `_internal\`）另外包含
 
 ## AGPL 元件說明（PyMuPDF）
 
-打包版用 PyMuPDF 把會議記錄轉成 PDF。PyMuPDF 與 MuPDF 以 AGPL-3.0 授權，因此**散布打包版時，打包版整體依 AGPL-3.0 條款提供**：
-本程式完整原始碼即本專案儲存庫，PyMuPDF 原始碼見上表網址。只使用原始碼（MIT）而自行改用其他 PDF 方式者，不受此限。
+本程式用 PyMuPDF 把會議記錄轉成 PDF。PyMuPDF 與 MuPDF 以 AGPL-3.0 授權。
+本專案自有程式碼以 MIT 授權；若你散布包含 PyMuPDF 的打包版，須依 AGPL-3.0 提供整體作品的對應原始碼
+（本專案原始碼、所用 PyMuPDF／MuPDF 的確切版本與原始碼、建置方式）。
 
 ## LGPL 元件說明
 
-FFmpeg 與 chardet 以 LGPL 授權，本打包版以**獨立檔案**形式包含（FFmpeg 為 `_internal\av.libs\` 內的 DLL；chardet 為 `_internal\` 內的 Python 模組），使用者可自行以相容版本替換。
-其原始碼可由上表網址取得。如需本打包版所使用版本的原始碼，請於本專案 GitHub Issues 提出，我們將提供取得方式。
+FFmpeg 與 chardet 以 LGPL 授權。自行打包時以**獨立檔案**形式包含（FFmpeg 為 `_internal\av.libs\` 內的 DLL；chardet 為 `_internal\` 內的 Python 模組），可自行以相容版本替換。
+其原始碼可由上表網址取得。
 
 ## 商標
 
