@@ -1,8 +1,8 @@
 # Third-Party Notices（第三方套件授權聲明）
 
 本程式原始碼以 MIT 授權發布（見 `LICENSE`）。
-本專案只提供原始碼，不散布打包好的執行檔（v1.1.0 起）。
-從原始碼執行或用 `build.py` 自行打包時，會使用下列第三方元件，各依其授權條款使用；自行打包的資料夾 `_internal\` 內各 `*.dist-info` 資料夾附有原始授權檔。
+GitHub Releases 提供打包好的 Windows 版（`錄音轉文字_vX.Y.Z_Windows.zip`，v1.1.1 起），內含下列第三方元件，各依其授權條款使用；
+打包資料夾 `_internal\` 內各 `*.dist-info` 資料夾附有原始授權檔。從原始碼執行或用 `build.py` 自行打包時，也會使用這些元件。
 **若你把自行打包的版本散布給他人**，須自行遵守下列各元件的授權條款（特別是下方 AGPL、LGPL 說明）。
 
 語音模型（Whisper 權重）**不包含**在本程式中，由使用者自行從 Hugging Face 下載（OpenAI Whisper，MIT 授權）。
@@ -44,13 +44,18 @@
 ## AGPL 元件說明（PyMuPDF）
 
 本程式用 PyMuPDF 把會議記錄轉成 PDF。PyMuPDF 與 MuPDF 以 AGPL-3.0 授權。
-本專案自有程式碼以 MIT 授權；若你散布包含 PyMuPDF 的打包版，須依 AGPL-3.0 提供整體作品的對應原始碼
-（本專案原始碼、所用 PyMuPDF／MuPDF 的確切版本與原始碼、建置方式）。
+本專案自有程式碼以 MIT 授權；Releases 的打包版包含 PyMuPDF，依 AGPL-3.0 提供整體作品的對應原始碼：
+
+- **本專案原始碼**：https://github.com/jaguarhook-lab/meeting-transcriber-zh ，與打包版同名的標籤（例如 `v1.1.1`）即為該版本的完整原始碼。
+- **PyMuPDF 1.27.2.2（MuPDF 1.27.2）**：https://github.com/pymupdf/PyMuPDF/releases/tag/1.27.2.2 ；MuPDF 原始碼：https://mupdf.com/releases
+- **建置方式**：Python 3.14、PyInstaller 6.22.3，執行原始碼中的 `build.py`（套件版本見 `requirements.txt`）。
+
+自行打包並散布給他人時，請以同樣方式提供你的對應原始碼。
 
 ## LGPL 元件說明
 
-FFmpeg 與 chardet 以 LGPL 授權。自行打包時以**獨立檔案**形式包含（FFmpeg 為 `_internal\av.libs\` 內的 DLL；chardet 為 `_internal\` 內的 Python 模組），可自行以相容版本替換。
-其原始碼可由上表網址取得。
+FFmpeg 與 chardet 以 LGPL 授權。打包版以**獨立檔案**形式包含（FFmpeg 為 `_internal\av.libs\` 內的 DLL，隨 PyAV 18.1.0 提供；chardet 為 `_internal\` 內的 Python 模組），可自行以相容版本替換。
+其原始碼可由上表網址取得（PyAV：https://github.com/PyAV-Org/PyAV/releases/tag/v18.1.0 ）。
 
 ## 商標
 
