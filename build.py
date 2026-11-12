@@ -21,11 +21,16 @@ def main() -> int:
         backup = HERE / f"對照表_打包前備份_{time.strftime('%Y%m%d_%H%M%S')}.tsv"
         shutil.copy2(DIST / "對照表.tsv", backup)
         print("已備份可攜版對照表：", backup.name)
+    known_bak = None
+    if (DIST / "已知名詞.txt").exists():  # 使用者可能在校正畫面新增過已知名詞
+        known_bak = HERE / f"已知名詞_打包前備份_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        shutil.copy2(DIST / "已知名詞.txt", known_bak)
+        print("已備份可攜版已知名詞：", known_bak.name)
 
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--name", "錄音轉文字",
            "--distpath", str(HERE / "dist"), "--workpath", str(HERE / "build"), "--specpath", str(HERE),
            "--collect-data", "faster_whisper", "--collect-binaries", "ctranslate2", "--collect-all", "onnxruntime",
-           "--collect-data", "opencc", "--collect-all", "av", "--hidden-import", "tokenizers",
+           "--collect-data", "opencc", "--collect-all", "av", "--collect-all", "pymupdf", "--hidden-import", "tokenizers",
            "--hidden-import", "markdown.extensions.tables", "--hidden-import", "markdown.extensions.sane_lists"]
     # 環境中有、但本程式用不到的大型套件：排除以縮小體積
     for m in ("matplotlib", "pandas", "scipy", "sqlalchemy", "PIL", "lxml", "cryptography", "bcrypt", "aiohttp",
@@ -42,7 +47,9 @@ def main() -> int:
     # 情境說明：本機有自己的版本就用，沒有就放範例
     shutil.copy2(HERE / "情境說明.txt" if (HERE / "情境說明.txt").exists() else HERE / "情境說明.範例.txt",
                  DIST / "情境說明.txt")
-    for f in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "對照表.範例.tsv", "情境說明.範例.txt"):
+    if known_bak or (HERE / "已知名詞.txt").exists():
+        shutil.copy2(known_bak or HERE / "已知名詞.txt", DIST / "已知名詞.txt")
+    for f in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "對照表.範例.tsv", "情境說明.範例.txt", "已知名詞.範例.txt"):
         if (HERE / f).exists():
             shutil.copy2(HERE / f, DIST / f)
     size = sum(p.stat().st_size for p in DIST.rglob("*") if p.is_file()) / 1024 ** 2

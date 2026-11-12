@@ -20,6 +20,7 @@ Releases 中的打包版（`錄音轉文字.exe` 與 `_internal\`）另外包含
 | huggingface_hub、hf_xet | Apache-2.0 | https://github.com/huggingface/huggingface_hub |
 | NumPy（含 OpenBLAS 等） | BSD-3-Clause | https://numpy.org |
 | opencc-python-reimplemented | Apache-2.0 | https://github.com/yichen0831/opencc-python |
+| PyMuPDF（含 MuPDF） | AGPL-3.0（或 Artifex 商業授權） | https://github.com/pymupdf/PyMuPDF |
 | Python-Markdown | BSD-3-Clause | https://github.com/Python-Markdown/markdown |
 | requests | Apache-2.0 | https://github.com/psf/requests |
 | urllib3 | MIT | https://github.com/urllib3/urllib3 |
@@ -38,6 +39,11 @@ Releases 中的打包版（`錄音轉文字.exe` 與 `_internal\`）另外包含
 | setuptools | MIT | https://github.com/pypa/setuptools |
 | pywin32 | PSF License | https://github.com/mhammond/pywin32 |
 | PyInstaller bootloader | GPL-2.0-or-later（含允許散布非 GPL 程式的例外條款） | https://pyinstaller.org |
+
+## AGPL 元件說明（PyMuPDF）
+
+打包版用 PyMuPDF 把會議記錄轉成 PDF。PyMuPDF 與 MuPDF 以 AGPL-3.0 授權，因此**散布打包版時，打包版整體依 AGPL-3.0 條款提供**：
+本程式完整原始碼即本專案儲存庫，PyMuPDF 原始碼見上表網址。只使用原始碼（MIT）而自行改用其他 PDF 方式者，不受此限。
 
 ## LGPL 元件說明
 

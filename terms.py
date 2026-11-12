@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 import ai_engines
-from common import GLOSSARY, GLOSSARY_EXAMPLE, context_text, hms
+from common import GLOSSARY, GLOSSARY_EXAMPLE, context_full, context_text, hms, known_pairs, known_prompt, load_known
 
 
 def ensure_glossary(path: Path = GLOSSARY) -> None:
@@ -40,7 +40,7 @@ def add_to_glossary(pairs: list, path: Path = GLOSSARY) -> int:
 
 def apply(rows: list, pairs: list) -> tuple[list, dict]:
     """依序替換（長詞優先），回傳新段落與各對照的替換次數。"""
-    pairs = sorted(pairs, key=lambda p: -len(p[0]))
+    pairs = sorted({(b, g) for b, g in pairs if b and b != g}, key=lambda p: -len(p[0]))  # 原詞與改為相同的不算
     counts = {p: 0 for p in pairs}
     out = []
     for r in rows:
@@ -88,14 +88,21 @@ TERMS_PROMPT = """以下是{情境}的語音辨識逐字稿，繁體中文，每
 def find_suspects(rows: list, log, engine: str = "Claude Code") -> list:
     """請 Claude Code 找疑問詞，回傳 [{原詞, 建議, 類別, 理由, 次數, 例句}]（只保留逐字稿真的有的詞）。"""
     log(f"請 {engine} 找疑似誤辨識的專有名詞（約需數分鐘）…")
-    out = ai_engines.run(engine, TERMS_PROMPT.replace("{情境}", context_text()) + to_text(rows))
+    known = load_known()
+    note = ("以下是寫法已確認正確的已知名詞（括號內為說明），不要列出；但逐字稿中它們的音近錯字仍要列，"
+            "建議寫法用這裡的寫法：\n" + known_prompt() + "\n\n") if known else ""
+    bg = context_full()
+    if "\n" in bg:  # 情境說明有第二行以後的背景說明，一併提供
+        note = "背景資料：\n" + bg + "\n\n" + note
+    out = ai_engines.run(engine, TERMS_PROMPT.replace("{情境}", context_text()).replace("逐字稿：\n", note + "逐字稿：\n")
+                         + to_text(rows))
     m = re.search(r"\[.*\]", out, re.S)
     if not m:
         raise RuntimeError(f"{engine} 回傳的內容不是 JSON：{out[:200]}")
     items, seen = [], set()
     for it in json.loads(m.group(0)):
         w = str(it.get("原詞", "")).strip()
-        if not w or w in seen:
+        if not w or w in seen or w in known:
             continue
         n, ex = occurrences(rows, w)
         if n == 0:

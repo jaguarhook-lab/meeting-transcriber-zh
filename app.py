@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import queue
+import re
 import threading
 import tkinter as tk
 import traceback
@@ -21,7 +22,8 @@ import asr
 import pdf
 import report
 import terms
-from common import hms, load_settings, safe_name, save_settings, unique_path
+import learn
+from common import KNOWN, add_known, hms, known_pairs, load_known, load_known_entries, merge_known, load_settings, safe_name, save_settings, unique_path
 
 AUDIO_TYPES = [("音檔", "*.m4a *.mp3 *.wav *.mp4 *.aac *.wma *.flac *.ogg *.mov"), ("全部檔案", "*.*")]
 FONT = "Microsoft JhengHei"
@@ -44,6 +46,7 @@ class App:
         self.q = queue.Queue()
         self.cancel = threading.Event()
         self.busy = False
+        self.step = ""
         self.limit = None  # (engine, reset, message)
         self.settings = load_settings()
 
@@ -124,6 +127,8 @@ class App:
         b2.grid(row=8, column=0, columnspan=3, sticky="ew")
         ttk.Button(b2, text="重新產生 PDF（編輯 md 之後）", command=self.regen_pdf).pack(side="left", padx=(0, 8))
         ttk.Button(b2, text="開啟輸出資料夾", command=self.open_out).pack(side="left")
+        ttk.Button(b2, text="編輯已知名詞", command=self.edit_known).pack(side="left", padx=(8, 0))
+        ttk.Button(b2, text="從我的修改學習", command=self.open_learn).pack(side="left", padx=(8, 0))
 
         self.pb = ttk.Progressbar(f, maximum=1000)
         self.pb.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(10, 2))
@@ -166,7 +171,12 @@ class App:
                     self.pb["value"] = 1000 * done / max(total, 1)
                     self.v_prog.set(f"已辨識 {hms(done)} / {hms(total)}　預估剩餘 {hms(eta)}")
                 elif kind == "call":
-                    val()
+                    try:
+                        val()
+                    except Exception:  # 單一回呼出錯不可讓整個更新迴圈停掉（否則狀態會一直卡在「工作進行中」）
+                        self.logbox.configure(state="normal")
+                        self.logbox.insert("end", traceback.format_exc(limit=2) + "\n")
+                        self.logbox.configure(state="disabled")
         except queue.Empty:
             pass
         self.root.after(150, self.poll)
@@ -174,8 +184,15 @@ class App:
     def ui(self, fn):
         self.q.put(("call", fn))
 
+    def set_step(self, step: str):
+        """記下目前在做哪一步（背景執行緒呼叫），並寫進日誌。"""
+        self.step = step
+        self.log(f"▶ {step}…")
+
     def set_busy(self, busy: bool):
         self.busy = busy
+        if not busy:
+            self.step = ""
         st = "disabled" if busy else "normal"
         for w in (self.btn_run, self.btn_fix, self.btn_rep):
             w.configure(state=st)
@@ -187,11 +204,11 @@ class App:
             try:
                 fn()
             except ai_engines.LimitError as e:
-                self.ui(lambda: self.handle_limit(e, retry))
+                self.ui(lambda e=e: self.handle_limit(e, retry))  # e=e：except 結束後 e 會被刪除，要先綁定
             except Exception as e:
                 self.log("錯誤：" + str(e))
                 self.log(traceback.format_exc(limit=2))
-                self.ui(lambda: messagebox.showerror("錯誤", str(e)))
+                self.ui(lambda msg=str(e): messagebox.showerror("錯誤", msg))
             finally:
                 self.ui(lambda: self.set_busy(False))
         self.set_busy(True)
@@ -367,12 +384,55 @@ class App:
         if self.v_out.get() and Path(self.v_out.get()).exists():
             os.startfile(self.v_out.get())
 
+    def edit_known(self):
+        """用記事本開啟已知名詞清單（沒有就先從範例建立）。"""
+        load_known()
+        if not KNOWN.exists():
+            KNOWN.write_text("# 已知名詞：寫法確定正確的人名、公司名、船名等，一行一個。\n", encoding="utf-8")
+        import subprocess
+        subprocess.Popen(["notepad.exe", str(KNOWN)])
+        self.log(f"已開啟已知名詞清單：{KNOWN}（存檔後，下次找詞與產生記錄時生效）")
+
+    def open_learn(self):
+        """比對 AI 原稿與使用者改好的會議記錄 md，把改過的詞加入已知名詞或對照表。"""
+        if not self.v_out.get():
+            messagebox.showwarning("缺少輸出資料夾", "請先選擇輸出資料夾與會議名稱。")
+            return
+        st = self.state()
+        orig = Path(st.get("minutes_ai", "")) if st.get("minutes_ai") else None
+        edited = Path(st.get("minutes_md", "")) if st.get("minutes_md") else None
+        if not (orig and orig.exists()):
+            if not messagebox.askyesno("找不到 AI 原稿", "這場會議沒有保存 AI 原稿（舊版程式產生的記錄沒有）。\n要自己選一份「修改前」的 md 來比對嗎？"):
+                return
+            p = filedialog.askopenfilename(title="選擇修改前的 md（AI 原稿）", initialdir=self.v_out.get(),
+                                           filetypes=[("Markdown", "*.md")])
+            if not p:
+                return
+            orig = Path(p)
+        if not (edited and edited.exists()):
+            p = filedialog.askopenfilename(title="選擇改好的會議記錄 md", initialdir=self.v_out.get(),
+                                           filetypes=[("Markdown", "*.md")])
+            if not p:
+                return
+            edited = Path(p)
+        items, skipped = learn.diff_edits(orig.read_text(encoding="utf-8"), edited.read_text(encoding="utf-8"))
+        # 已經學過的（已知名詞已有、且誤寫已記錄）不再列
+        known = {e["詞"]: e for e in load_known_entries()}
+        items = [it for it in items
+                 if not (it["改"] in known and (it["原"] == it["改"] or it["原"] in known[it["改"]]["誤寫"]))]
+        if not items:
+            messagebox.showinfo("沒有新的修改", f"比對 {orig.name} 與 {edited.name}，沒有找到需要學習的詞修改。"
+                                + (f"\n（另有 {skipped} 處較長的改寫未列出）" if skipped else ""))
+            return
+        LearnWindow(self, items, skipped, orig, edited)
+
     def stop(self):
         self.cancel.set()
         self.log("取消中…（等目前這一段辨識完就停止）")
 
     def on_close(self):
-        if self.busy and not messagebox.askyesno("確認", "工作進行中，確定要關閉嗎？\n（辨識可下次續跑）"):
+        doing = f"目前步驟：{self.step}\n" if getattr(self, "step", "") else ""
+        if self.busy and not messagebox.askyesno("確認", f"工作進行中，確定要關閉嗎？\n{doing}（辨識可下次續跑；已產生的 md 不會遺失）"):
             return
         self.cancel.set()
         save_settings(self.settings)
@@ -395,6 +455,7 @@ class App:
         self.save_state(audio=str(audio), model=mp, language=lang)
 
         def job():
+            self.set_step("語音辨識中")
             rows = asr.transcribe(audio, wd, self.log, lambda d, t, e: self.q.put(("prog", (d, t, e))), self.cancel,
                                   model_dir=mp, language=lang)
             if not self.cancel.is_set() and rows:
@@ -428,6 +489,7 @@ class App:
         name, topic = self.name, self.v_topic.get().strip()
         audio_name = Path(st.get("audio", "")).name
         pending = st.get("pending", [])
+        confirmed = st.get("confirmed", [])
         have_min = bool(st.get("minutes_md") and Path(st["minutes_md"]).exists() and st.get("minutes_for") == str(tp))
         have_top = bool(topic and st.get("topic_md") and Path(st["topic_md"]).exists() and st.get("topic_for") == f"{tp}|{topic}")
         redo = False
@@ -443,21 +505,39 @@ class App:
             text = tp.read_text(encoding="utf-8")
             done = {} if redo else self.state()
             if not (done.get("minutes_md") and Path(done["minutes_md"]).exists() and done.get("minutes_for") == str(tp)):
-                md = report.minutes(name, audio_name, tp.name, text, pending, topic, self.log, engine)
+                self.set_step(f"{engine} 整理會議記錄中")
+                raw = report.minutes(name, audio_name, tp.name, text, pending, topic, self.log, engine, confirmed)
+                md, pend_md = report.split_minutes(raw)
                 mdp = unique_path(self.outdir / f"{name}_會議記錄.md")
                 mdp.write_text(md, encoding="utf-8")
+                # AI 原稿另存在工作檔（之後使用者編輯 md 不影響），供「從我的修改學習」比對
+                orig = unique_path(self.workdir / "會議記錄_AI原稿.md")
+                orig.write_text(md, encoding="utf-8")
+                self.save_state(minutes_md=str(mdp), minutes_for=str(tp), minutes_engine=engine, minutes_ai=str(orig))
+                self.log(f"{engine} 已完成：{mdp.name}")
+                if pend_md:
+                    pp = unique_path(self.outdir / f"{name}_待確認.md")
+                    pp.write_text(pend_md, encoding="utf-8")
+                    self.log(f"待確認清單：{pp.name}（不轉 PDF）")
+                else:
+                    self.log(f"注意：{engine} 沒有輸出待確認清單（分隔線不見），全部內容都放在 {mdp.name}。")
+                self.set_step("會議記錄轉 PDF 中")
                 pdfp = pdf.md_to_pdf(mdp, unique_path(mdp.with_suffix(".pdf")))
-                self.save_state(minutes_md=str(mdp), minutes_for=str(tp), minutes_engine=engine)
-                self.log(f"已產生：{mdp.name}、{pdfp.name}（{engine}）")
+                self.log(f"PDF 已產生：{pdfp.name}")
             if topic and not (done.get("topic_md") and Path(done["topic_md"]).exists() and done.get("topic_for") == f"{tp}|{topic}"):
-                md2 = report.topic_report(name, topic, text, pending, self.log, engine)
+                self.set_step(f"{engine} 整理專題中")
+                md2 = report.topic_report(name, topic, text, pending, self.log, engine, confirmed)
                 tpm = unique_path(self.outdir / f"{name}_{safe_name(topic)}_專題整理.md")
                 tpm.write_text(md2, encoding="utf-8")
-                tpp = pdf.md_to_pdf(tpm, unique_path(tpm.with_suffix(".pdf")))
                 self.save_state(topic_md=str(tpm), topic_for=f"{tp}|{topic}", topic_engine=engine)
-                self.log(f"已產生：{tpm.name}、{tpp.name}（{engine}）")
-            self.log("完成。請檢查「待確認事項」，可直接編輯 md，再按「重新產生 PDF」。")
-            self.ui(lambda: messagebox.showinfo("完成", f"會議記錄已產生（{engine}）。\n無法確認的詞列在記錄檔最後的「待確認事項」，\n可直接編輯 md 後按「重新產生 PDF」。"))
+                self.log(f"{engine} 已完成：{tpm.name}")
+                self.set_step("專題轉 PDF 中")
+                tpp = pdf.md_to_pdf(tpm, unique_path(tpm.with_suffix(".pdf")))
+                self.log(f"PDF 已產生：{tpp.name}")
+            self.log("完成。請對照「_待確認.md」修改會議記錄 md，再按「重新產生 PDF」；改完可按「從我的修改學習」。")
+            self.ui(lambda: messagebox.showinfo("完成", f"會議記錄已產生（{engine}）。\n無法確認的詞列在「{name}_待確認.md」，\n"
+                                                        "可直接編輯會議記錄 md 後按「重新產生 PDF」。\n"
+                                                        "改完後按「從我的修改學習」，下次就不用再改同樣的錯。"))
         self.run_bg(job, retry=self.start_report)
 
     def regen_pdf(self):
@@ -475,6 +555,7 @@ class App:
 
         def job():
             for m in mds:
+                self.set_step(f"{m.name} 轉 PDF 中")
                 pdf.md_to_pdf(m, m.with_suffix(".pdf"))
                 self.log(f"已重新產生：{m.with_suffix('.pdf').name}")
         self.run_bg(job)
@@ -531,7 +612,7 @@ class DownloadWindow:
                     self.app.ui(done)
             except Exception as e:
                 self.app.log("下載失敗：" + str(e))
-                self.app.ui(lambda: messagebox.showerror("下載失敗", f"{e}\n\n請確認網路連線後再試一次（會從中斷處接著下載）。", parent=self.win))
+                self.app.ui(lambda e=e: messagebox.showerror("下載失敗", f"{e}\n\n請確認網路連線後再試一次（會從中斷處接著下載）。", parent=self.win))
             finally:
                 self.app.ui(lambda: self.btn.winfo_exists() and self.btn.configure(state="normal"))
         threading.Thread(target=job, daemon=True).start()
@@ -543,13 +624,13 @@ class DownloadWindow:
 
 class FixWindow:
     """專有名詞校正畫面。"""
-    COLS = ("原詞", "改為", "次數", "處理", "加入對照表", "類別", "理由")
+    COLS = ("原詞", "改為", "次數", "處理", "加入清單", "類別", "理由")
     ACTIONS = ("替換", "待確認", "不改")
 
     def __init__(self, app: App, raw_rows: list):
         self.app = app
         self.raw = raw_rows
-        self.pairs = terms.load_glossary()
+        self.pairs = terms.load_glossary() + known_pairs()  # 已知名詞的「常被誤寫成」也一併自動替換
         self.rows, self.gl_counts = terms.apply(raw_rows, self.pairs)
         self.items = []
 
@@ -567,7 +648,7 @@ class FixWindow:
 
         mid = ttk.Frame(w, padding=(8, 0))
         mid.pack(fill="both", expand=True)
-        self.tv = ttk.Treeview(mid, columns=self.COLS, show="headings", selectmode="browse")
+        self.tv = ttk.Treeview(mid, columns=self.COLS, show="headings", selectmode="extended")
         widths = (130, 130, 50, 70, 80, 70, 380)
         for c, wd in zip(self.COLS, widths):
             self.tv.heading(c, text=c)
@@ -578,7 +659,7 @@ class FixWindow:
         sb.pack(side="right", fill="y")
         self.tv.bind("<<TreeviewSelect>>", self.on_select)
 
-        ed = ttk.LabelFrame(w, text="編輯選取的項目", padding=8)
+        ed = ttk.LabelFrame(w, text="編輯選取的項目（按住 Ctrl 或 Shift 可多選，一次套用）", padding=8)
         ed.pack(fill="x", padx=8, pady=6)
         self.v_to = tk.StringVar()
         self.v_act = tk.StringVar(value="替換")
@@ -587,8 +668,8 @@ class FixWindow:
         ttk.Entry(ed, textvariable=self.v_to, width=22).grid(row=0, column=1, padx=4)
         for i, a in enumerate(self.ACTIONS):
             ttk.Radiobutton(ed, text=a, value=a, variable=self.v_act).grid(row=0, column=2 + i, padx=4)
-        ttk.Checkbutton(ed, text="加入共用對照表（下次自動套用）", variable=self.v_gl).grid(row=0, column=5, padx=8)
-        ttk.Button(ed, text="更新此項", command=self.update_item).grid(row=0, column=6, padx=4)
+        ttk.Checkbutton(ed, text="加入清單（替換→對照表；不改→已知名詞）", variable=self.v_gl).grid(row=0, column=5, padx=8)
+        ttk.Button(ed, text="更新選取項目", command=self.update_item).grid(row=0, column=6, padx=4)
         ttk.Button(ed, text="▶ 播放原音", command=self.play).grid(row=0, column=7, padx=4)
         ttk.Button(ed, text="■ 停止", command=lambda: winsound.PlaySound(None, 0)).grid(row=0, column=8)
         self.ex = tk.Text(ed, height=4, wrap="word", font=(FONT, 9), state="disabled")
@@ -597,7 +678,8 @@ class FixWindow:
 
         bot = ttk.Frame(w, padding=8)
         bot.pack(fill="x")
-        ttk.Label(bot, text="「待確認」的詞不替換，會列在會議記錄最後的待確認區，之後可直接編輯記錄檔。", foreground="#666").pack(side="left")
+        ttk.Label(bot, text="填了「改為」按更新就會替換；「改為」留空才是「待確認」（不替換，列在會議記錄最後，之後可直接編輯記錄檔）。",
+                  foreground="#666").pack(side="left")
         ttk.Button(bot, text="套用並存檔", style="Big.TButton", command=self.apply_save).pack(side="right")
 
         if ai_engines.find(app.engine):
@@ -614,6 +696,7 @@ class FixWindow:
 
     def ask_ai(self):
         engine = self.app.engine
+        self.ai_busy = True
         self.btn_ai.configure(state="disabled", text=f"{engine} 分析中…")
         self.app.log(f"本次使用：{engine}")
 
@@ -622,12 +705,16 @@ class FixWindow:
             try:
                 found = terms.find_suspects(self.rows, self.app.log, engine)
             except ai_engines.LimitError as e:
-                self.app.ui(lambda: self.app.handle_limit(e, retry=lambda: self.win.winfo_exists() and self.ask_ai()))
+                self.app.ui(lambda e=e: self.app.handle_limit(e, retry=lambda: self.win.winfo_exists() and self.ask_ai()))
             except Exception as e:
                 self.app.log("找疑問詞失敗：" + str(e))
 
             def done():
+                self.ai_busy = False
                 if not self.win.winfo_exists():
+                    if found:
+                        self.app.log(f"注意：{engine} 列出的 {len(found)} 個疑問詞在校正畫面關閉後才送達，這次沒有用到。"
+                                     "可按「② 校正專有名詞」重新開啟再找一次。")
                     return
                 have = {it["原詞"] for it in self.items}
                 for it in found:
@@ -645,64 +732,109 @@ class FixWindow:
         d.title("手動新增")
         d.transient(self.win)
         a, b = tk.StringVar(), tk.StringVar()
-        ttk.Label(d, text="逐字稿中的錯誤寫法").grid(row=0, column=0, padx=8, pady=6)
-        ttk.Entry(d, textvariable=a).grid(row=0, column=1, padx=8)
+        ttk.Label(d, text="逐字稿中的錯誤寫法\n（多個用頓號或逗號分隔）").grid(row=0, column=0, padx=8, pady=6)
+        ttk.Entry(d, textvariable=a, width=36).grid(row=0, column=1, padx=8)
         ttk.Label(d, text="改為").grid(row=1, column=0, padx=8, pady=6)
-        ttk.Entry(d, textvariable=b).grid(row=1, column=1, padx=8)
+        ttk.Entry(d, textvariable=b, width=36).grid(row=1, column=1, padx=8)
 
         def ok():
-            word = a.get().strip()
-            if not word:
+            words = [w for w in re.split(r"[、,，;；]+", a.get()) if w.strip()]
+            words = list(dict.fromkeys(w.strip() for w in words))
+            if not words:
                 return
-            n, ex = terms.occurrences(self.rows, word)
-            if n == 0:
-                messagebox.showwarning("找不到", f"逐字稿中沒有「{word}」。", parent=d)
-                return
-            self.items.append({"原詞": word, "建議": b.get().strip(), "類別": "手動", "理由": "",
-                               "次數": n, "例句": ex, "處理": "替換" if b.get().strip() else "待確認", "加入": False})
-            self.refresh()
-            d.destroy()
+            good = b.get().strip()
+            have = {it["原詞"] for it in self.items}
+            added, missing, dup = [], [], []
+            for word in words:
+                if word in have:
+                    dup.append(word)
+                    continue
+                n, ex = terms.occurrences(self.rows, word)
+                if n == 0:
+                    missing.append(word)
+                    continue
+                self.items.append({"原詞": word, "建議": good, "類別": "手動", "理由": "",
+                                   "次數": n, "例句": ex, "處理": "替換" if good else "待確認", "加入": False})
+                added.append(word)
+            if missing or dup:
+                msg = []
+                if missing:
+                    msg.append("逐字稿中沒有：" + "、".join(missing))
+                if dup:
+                    msg.append("清單上已經有：" + "、".join(dup))
+                messagebox.showwarning("部分未新增", "\n".join(msg), parent=d)
+            if added:
+                self.refresh()
+                d.destroy()
         ttk.Button(d, text="新增", command=ok).grid(row=2, column=0, columnspan=2, pady=8)
 
-    def current(self):
-        sel = self.tv.selection()
-        return int(sel[0]) if sel else None
+    def selected(self) -> list:
+        return [int(i) for i in self.tv.selection()]
 
     def on_select(self, _=None):
-        i = self.current()
-        if i is None:
+        sel = self.selected()
+        if not sel:
             return
-        it = self.items[i]
-        self.v_to.set(it["建議"])
-        self.v_act.set(it["處理"])
-        self.v_gl.set(it["加入"])
+        its = [self.items[i] for i in sel]
+
+        def common(key, blank):
+            vals = {it[key] for it in its}
+            return (vals.pop(), False) if len(vals) == 1 else (blank, True)
+        to, m_to = common("建議", "")
+        act, m_act = common("處理", "")
+        gl, m_gl = common("加入", False)
+        self.v_to.set(to)
+        self.v_act.set(act)
+        self.v_gl.set(gl)
+        # 多選時欄位值不一致就留空；使用者沒動的欄位，更新時保留各項原值
+        self.shown = {"to": (to, m_to), "act": (act, m_act), "gl": (gl, m_gl)}
         self.ex.configure(state="normal")
         self.ex.delete("1.0", "end")
-        for s, t in it["例句"]:
-            self.ex.insert("end", f"[{hms(s)}] {t}\n")
+        if len(its) == 1:
+            for s, t in its[0]["例句"]:
+                self.ex.insert("end", f"[{hms(s)}] {t}\n")
+        else:
+            for it in its:
+                if it["例句"]:
+                    s, t = it["例句"][0]
+                    self.ex.insert("end", f"【{it['原詞']}】[{hms(s)}] {t}\n")
         self.ex.configure(state="disabled")
 
     def update_item(self):
-        i = self.current()
-        if i is None:
+        sel = self.selected()
+        if not sel:
             return
-        it = self.items[i]
-        it["建議"] = self.v_to.get().strip()
-        it["處理"] = self.v_act.get()
-        if it["處理"] == "替換" and not it["建議"]:
-            messagebox.showwarning("缺少改為", "選「替換」時請填「改為」。", parent=self.win)
-            return
-        it["加入"] = self.v_gl.get() and it["處理"] == "替換"
+        shown = getattr(self, "shown", {})
+        new_to, new_act, new_gl = self.v_to.get().strip(), self.v_act.get(), self.v_gl.get()
+
+        def pick(key, new, own):
+            init, mixed = shown.get(key, (None, False))
+            return own if mixed and new == init else new
+        plan = []
+        for i in sel:
+            it = self.items[i]
+            to = pick("to", new_to, it["建議"])
+            act = pick("act", new_act, it["處理"]) or it["處理"]
+            if act == "待確認" and to:
+                act = "替換"  # 填了改為就是要替換；想保留待確認請把改為留空
+            if act == "替換" and not to:
+                messagebox.showwarning("缺少改為", "選「替換」時請填「改為」。", parent=self.win)
+                return
+            gl = pick("gl", new_gl, it["加入"]) and act in ("替換", "不改")  # 替換→對照表；不改→已知名詞
+            plan.append((it, to, act, gl))
+        for it, to, act, gl in plan:
+            it["建議"], it["處理"], it["加入"] = to, act, gl
         self.refresh()
-        nxt = i + 1 if i + 1 < len(self.items) else i
+        last = max(sel)
+        nxt = last + 1 if last + 1 < len(self.items) else last
         self.tv.selection_set(str(nxt))
         self.tv.see(str(nxt))
 
     def play(self):
-        i = self.current()
-        if i is None or not self.items[i]["例句"]:
+        sel = self.selected()
+        if not sel or not self.items[sel[0]]["例句"]:
             return
-        s = self.items[i]["例句"][0][0]
+        s = self.items[sel[0]]["例句"][0][0]
         try:
             clip = asr.clip_wav(self.app.workdir, s - 2, s + 10, self.app.workdir / "_播放片段.wav")
             winsound.PlaySound(str(clip), winsound.SND_FILENAME | winsound.SND_ASYNC)
@@ -711,7 +843,30 @@ class FixWindow:
 
     # ----- 存檔 -----
     def apply_save(self):
-        reps = [(it["原詞"], it["建議"]) for it in self.items if it["處理"] == "替換" and it["建議"]]
+        if getattr(self, "ai_busy", False) and not messagebox.askyesno(
+                "AI 還在找疑問詞",
+                f"{self.app.engine} 還在找疑問詞，現在存檔就用不到它的結果。\n\n「是」：現在存檔\n「否」：回到畫面，等它找完",
+                parent=self.win):
+            return
+        filled =[it for it in self.items if it["處理"] == "待確認" and it["建議"]]
+        if filled:
+            ans = messagebox.askyesnocancel(
+                "改為已填但仍是待確認",
+                "下列詞已填「改為」，但處理仍是「待確認」（不會替換）：\n\n"
+                + "\n".join(f"・{it['原詞']} → {it['建議']}" for it in filled)
+                + "\n\n「是」：改成替換後存檔\n「否」：照原樣存（不替換）\n「取消」：回到畫面",
+                parent=self.win)
+            if ans is None:
+                return
+            if ans:
+                for it in filled:
+                    it["處理"] = "替換"
+                self.refresh()
+        n_pend = sum(it["處理"] == "待確認" for it in self.items)
+        if n_pend and not messagebox.askokcancel(
+                "還有待確認", f"還有 {n_pend} 項「待確認」，這些詞不會替換，會列在會議記錄最後。\n確定存檔？", parent=self.win):
+            return
+        reps =[(it["原詞"], it["建議"]) for it in self.items if it["處理"] == "替換" and it["建議"]]
         pending = [it["原詞"] for it in self.items if it["處理"] == "待確認"]
         rows, counts = terms.apply(self.rows, reps)
         app = self.app
@@ -720,13 +875,137 @@ class FixWindow:
         allc = dict(self.gl_counts)
         allc.update(counts)
         terms.write_record(app.workdir / "校正紀錄.md", allc, pending)
-        added = terms.add_to_glossary([(it["原詞"], it["建議"]) for it in self.items if it["加入"]])
-        app.save_state(transcript=str(tp), pending=pending)
+        added = terms.add_to_glossary([(it["原詞"], it["建議"]) for it in self.items if it["加入"] and it["處理"] == "替換"])
+        added_known = add_known([it["原詞"] for it in self.items if it["加入"] and it["處理"] == "不改"])
+        # 已確認寫法：實際替換過的正確寫法＋選「不改」的詞（不改＝確認原寫法正確），產生記錄時告訴 AI 不必加（?）
+        confirmed = sorted({g for (b, g), c in allc.items() if c} | {it["原詞"] for it in self.items if it["處理"] == "不改"})
+        app.save_state(transcript=str(tp), pending=pending, confirmed=confirmed)
         winsound.PlaySound(None, 0)
-        app.log(f"已存逐字稿：{tp.name}（本次替換 {sum(counts.values())} 處，待確認 {len(pending)} 項，對照表新增 {added} 筆）")
+        app.log(f"已存逐字稿：{tp.name}（本次替換 {sum(counts.values())} 處，待確認 {len(pending)} 項，對照表新增 {added} 筆，已知名詞新增 {added_known} 筆）")
         self.win.destroy()
         if ai_engines.find(app.engine) and messagebox.askyesno("下一步", f"逐字稿已存檔。要接著用 {app.engine} 產生會議記錄嗎？"):
             app.start_report()
+
+
+class LearnWindow:
+    """從使用者的修改學習：列出 AI 原稿 → 改好的 md 之間改過的詞，勾選加入已知名詞或對照表。"""
+    COLS = ("原寫法", "改為", "次數", "動作", "說明", "前後文（AI 原稿）")
+    ACTIONS = ("已知名詞", "只加對照表", "略過")
+
+    def __init__(self, app: "App", items: list, skipped: int, orig: Path, edited: Path):
+        self.app = app
+        for it in items:
+            it.setdefault("動作", "已知名詞")
+            it.setdefault("說明", "")
+        self.items = items
+        w = self.win = tk.Toplevel(app.root)
+        w.title(f"從我的修改學習 — {edited.name}")
+        w.geometry("1000x600")
+        w.transient(app.root)
+        msg = (f"比對「{orig.name}」→「{edited.name}」，找到 {len(items)} 處改過的詞"
+               + (f"（另有 {skipped} 處較長的改寫未列出）" if skipped else "") + "。")
+        ttk.Label(w, text=msg, font=(FONT, 10, "bold"), padding=8).pack(anchor="w")
+        ttk.Label(w, padding=(8, 0), foreground="#666", text=(
+            "「已知名詞」：把「改為」記成正確寫法（可填說明，例如職稱、公司關係），原寫法記成它的常見誤寫，下次自動替換。\n"
+            "「只加對照表」：只記錯字 → 正確寫法。原寫法＝改為的列，是你刪掉（?）確認寫法正確的詞。可按住 Ctrl／Shift 多選。")
+        ).pack(anchor="w")
+        mid = ttk.Frame(w, padding=8)
+        mid.pack(fill="both", expand=True)
+        self.tv = ttk.Treeview(mid, columns=self.COLS, show="headings", selectmode="extended")
+        for c, wd in zip(self.COLS, (120, 120, 45, 80, 200, 380)):
+            self.tv.heading(c, text=c)
+            self.tv.column(c, width=wd, anchor="center" if c in ("次數", "動作") else "w")
+        sb = ttk.Scrollbar(mid, command=self.tv.yview)
+        self.tv.configure(yscrollcommand=sb.set)
+        self.tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tv.bind("<<TreeviewSelect>>", self.on_select)
+
+        ed = ttk.LabelFrame(w, text="編輯選取的項目", padding=8)
+        ed.pack(fill="x", padx=8)
+        self.v_a, self.v_b, self.v_desc, self.v_act = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
+        ttk.Label(ed, text="原寫法").grid(row=0, column=0)
+        self.e_a = ttk.Entry(ed, textvariable=self.v_a, width=16)
+        self.e_a.grid(row=0, column=1, padx=4)
+        ttk.Label(ed, text="改為").grid(row=0, column=2)
+        self.e_b = ttk.Entry(ed, textvariable=self.v_b, width=16)
+        self.e_b.grid(row=0, column=3, padx=4)
+        ttk.Label(ed, text="說明").grid(row=0, column=4)
+        ttk.Entry(ed, textvariable=self.v_desc, width=28).grid(row=0, column=5, padx=4)
+        for i, a in enumerate(self.ACTIONS):
+            ttk.Radiobutton(ed, text=a, value=a, variable=self.v_act).grid(row=0, column=6 + i, padx=3)
+        ttk.Button(ed, text="更新選取項目", command=self.update_items).grid(row=0, column=9, padx=6)
+
+        bot = ttk.Frame(w, padding=8)
+        bot.pack(fill="x")
+        ttk.Button(bot, text="全部略過", command=lambda: self.set_all("略過")).pack(side="left")
+        ttk.Button(bot, text="寫入清單", style="Big.TButton", command=self.save).pack(side="right")
+        self.refresh()
+
+    def refresh(self):
+        self.tv.delete(*self.tv.get_children())
+        for i, it in enumerate(self.items):
+            self.tv.insert("", "end", iid=str(i), values=(it["原"], it["改"], it["次數"], it["動作"], it["說明"], it["前後文"]))
+
+    def selected(self) -> list:
+        return [int(i) for i in self.tv.selection()]
+
+    def on_select(self, _=None):
+        sel = self.selected()
+        if not sel:
+            return
+        its = [self.items[i] for i in sel]
+        one = len(its) == 1
+        # 多選時只能改「動作」與「說明」（原寫法、改為各不相同）
+        for e in (self.e_a, self.e_b):
+            e.configure(state="normal" if one else "disabled")
+        self.v_a.set(its[0]["原"] if one else "")
+        self.v_b.set(its[0]["改"] if one else "")
+        acts = {it["動作"] for it in its}
+        descs = {it["說明"] for it in its}
+        self.v_act.set(acts.pop() if len(acts) == 1 else "")
+        self.v_desc.set(descs.pop() if len(descs) == 1 else "")
+        self.shown_desc = self.v_desc.get()
+
+    def update_items(self):
+        sel = self.selected()
+        if not sel:
+            return
+        if len(sel) == 1:
+            a, b = self.v_a.get().strip(), self.v_b.get().strip()
+            if not b:
+                messagebox.showwarning("缺少改為", "「改為」不可空白。", parent=self.win)
+                return
+            self.items[sel[0]]["原"], self.items[sel[0]]["改"] = a or b, b
+        for i in sel:
+            it = self.items[i]
+            if self.v_act.get():
+                it["動作"] = self.v_act.get()
+            if len(sel) == 1 or self.v_desc.get() != getattr(self, "shown_desc", ""):
+                it["說明"] = self.v_desc.get().strip()
+        self.refresh()
+        nxt = min(max(sel) + 1, len(self.items) - 1)
+        self.tv.selection_set(str(nxt))
+        self.tv.see(str(nxt))
+
+    def set_all(self, act):
+        for it in self.items:
+            it["動作"] = act
+        self.refresh()
+
+    def save(self):
+        res = {"新增": 0, "更新": 0, "不變": 0}
+        gl = []
+        for it in self.items:
+            if it["動作"] == "已知名詞":
+                res[merge_known(it["改"], it["說明"], [it["原"]] if it["原"] != it["改"] else [])] += 1
+            elif it["動作"] == "只加對照表" and it["原"] != it["改"]:
+                gl.append((it["原"], it["改"]))
+        n_gl = terms.add_to_glossary(gl)
+        msg = f"已知名詞：新增 {res['新增']} 筆、更新 {res['更新']} 筆；對照表新增 {n_gl} 筆。下一場會議起生效。"
+        self.app.log("從修改學習：" + msg)
+        messagebox.showinfo("已寫入", msg, parent=self.win)
+        self.win.destroy()
 
 
 def selftest(audio: str, out: str, engine: str = "Claude Code") -> None:
