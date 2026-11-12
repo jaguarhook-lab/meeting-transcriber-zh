@@ -8,7 +8,7 @@
 - 繁體中文為主，也支援英文、日文、自動偵測、多語混合。
 
 > **下載使用（不需要安裝 Python）**：到右側 **[Releases](https://github.com/jaguarhook-lab/meeting-transcriber-zh/releases/latest)**
-> 下載 `錄音轉文字_vX.Y.Z_Windows.zip`，解壓縮後雙擊資料夾裡的 `錄音轉文字.exe`。只支援 Windows（64 位元）。
+> 下載 `meeting-transcriber-zh-vX.Y.Z-win64.zip`，解壓縮後雙擊資料夾裡的 `錄音轉文字.exe`。只支援 Windows（64 位元）。
 > 語音模型不在壓縮檔內，第一次開啟時程式會引導下載。
 >
 > 想從原始碼執行或自行打包，見「**十一、從原始碼執行／自行打包**」。
