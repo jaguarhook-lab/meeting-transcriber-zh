@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""請選定的 AI（Claude Code 或 Codex）依逐字稿寫會議記錄與專題整理（Markdown）。"""
+"""會議記錄與專題整理的提示詞。"""
 import re
 
-import ai_engines
+import engines
 from common import context_full, known_prompt, load_known
 
 SPLIT = "<<<待確認>>>"
@@ -99,7 +99,6 @@ def _clean(md: str) -> str:
 
 
 def _context(words: list, confirmed: list = ()) -> str:
-    """背景資料（情境說明、已知名詞與說明）＋本次校正確認的寫法＋待確認詞。"""
     out = []
     ctx = context_full()
     if ctx:
@@ -117,9 +116,7 @@ def _context(words: list, confirmed: list = ()) -> str:
 
 
 def split_minutes(md: str) -> tuple[str, str, str]:
-    """拆成（正式記錄, 待確認清單, 問題說明）。
-    分隔線必須單獨成一行、恰好出現一次，且前後兩部分都不能是空的；不符合時「問題說明」不是空字串，
-    正式記錄放 AI 回覆中可用的部分（沒有分隔線時是全部內容），由呼叫端決定不產生 PDF、請使用者檢查。"""
+    """回傳（正式記錄, 待確認清單, 問題）。分隔線要單獨一行、只出現一次、前後都有內容，否則「問題」非空。"""
     lines = md.splitlines()
     idx = [i for i, l in enumerate(lines) if l.strip() == SPLIT]
     if len(idx) != 1:
@@ -139,16 +136,16 @@ def split_minutes(md: str) -> tuple[str, str, str]:
 
 def minutes(name: str, audio: str, transcript_name: str, text: str, pending: list, topic: str, log,
             engine: str = "Claude Code", confirmed: list = ()) -> str:
-    """回傳 AI 原始輸出（含分隔線）；用 split_minutes() 拆成正式記錄與待確認清單。"""
+    """回傳原始輸出，用 split_minutes() 拆開。"""
     log(f"請 {engine} 撰寫會議記錄（約需數分鐘）…")
     note = f"（另有專題整理「{topic}」，正式記錄中該主題只需簡述並註明見專題。）" if topic else ""
     p = MINUTES_PROMPT.format(name=name, audio=audio, transcript=transcript_name, context=_context(pending, confirmed),
                               topic_note=note, rules=COMMON_RULES, engine=engine, split=SPLIT)
-    return _clean(ai_engines.run(engine, p + text))
+    return _clean(engines.run(engine, p + text))
 
 
 def topic_report(name: str, topic: str, text: str, pending: list, log, engine: str = "Claude Code",
                  confirmed: list = ()) -> str:
     log(f"請 {engine} 撰寫專題「{topic}」（約需數分鐘）…")
     p = TOPIC_PROMPT.format(name=name, topic=topic, context=_context(pending, confirmed), rules=COMMON_RULES, engine=engine)
-    return _clean(ai_engines.run(engine, p + text))
+    return _clean(engines.run(engine, p + text))

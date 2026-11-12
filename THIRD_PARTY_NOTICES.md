@@ -1,11 +1,10 @@
 # Third-Party Notices（第三方套件授權聲明）
 
-本程式原始碼以 MIT 授權發布（見 `LICENSE`）。
-GitHub Releases 提供打包好的 Windows 版（`meeting-transcriber-zh-vX.Y.Z-win64.zip`，v1.1.1 起），內含下列第三方元件，各依其授權條款使用；
-打包資料夾 `_internal\` 內各 `*.dist-info` 資料夾附有原始授權檔。從原始碼執行或用 `build.py` 自行打包時，也會使用這些元件。
-**若你把自行打包的版本散布給他人**，須自行遵守下列各元件的授權條款（特別是下方 AGPL、LGPL 說明）。
+本程式的程式碼採 MIT 授權（見 `LICENSE`）。
 
-語音模型（Whisper 權重）**不包含**在本程式中，由使用者自行從 Hugging Face 下載（OpenAI Whisper，MIT 授權）。
+GitHub Releases 上的 Windows 打包版（`meeting-transcriber-zh-vX.Y.Z-win64.zip`）包含下列第三方元件，各自依其授權使用，原始授權檔在 `_internal\` 下各個 `*.dist-info` 資料夾裡。從原始碼執行或用 `build.py` 打包時也會用到這些元件；自行打包後散布給別人的話，請遵守它們的授權，特別是下面的 AGPL 與 LGPL 說明。
+
+語音模型（OpenAI Whisper，MIT 授權）沒有包含在內，使用者自行從 Hugging Face 下載。
 
 | 元件 | 授權 | 專案網址 |
 |---|---|---|
@@ -41,22 +40,20 @@ GitHub Releases 提供打包好的 Windows 版（`meeting-transcriber-zh-vX.Y.Z-
 | pywin32 | PSF License | https://github.com/mhammond/pywin32 |
 | PyInstaller bootloader | GPL-2.0-or-later（含允許散布非 GPL 程式的例外條款） | https://pyinstaller.org |
 
-## AGPL 元件說明（PyMuPDF）
+## AGPL（PyMuPDF）
 
-本程式用 PyMuPDF 把會議記錄轉成 PDF。PyMuPDF 與 MuPDF 以 AGPL-3.0 授權。
-本專案自有程式碼以 MIT 授權；Releases 的打包版包含 PyMuPDF，依 AGPL-3.0 提供整體作品的對應原始碼：
+會議記錄轉 PDF 用的是 PyMuPDF，PyMuPDF 和 MuPDF 都採 AGPL-3.0 授權。因為打包版包含 PyMuPDF，整個作品的對應原始碼如下：
 
-- **本專案原始碼**：https://github.com/jaguarhook-lab/meeting-transcriber-zh ，與打包版同名的標籤（例如 `v1.1.1`）即為該版本的完整原始碼。
-- **PyMuPDF 1.27.2.2（MuPDF 1.27.2）**：https://github.com/pymupdf/PyMuPDF/releases/tag/1.27.2.2 ；MuPDF 原始碼：https://mupdf.com/releases
-- **建置方式**：Python 3.14、PyInstaller 6.22.3，執行原始碼中的 `build.py`（套件版本見 `requirements.txt`）。
+- 本專案：https://github.com/jaguarhook-lab/meeting-transcriber-zh ，和打包版同名的標籤（例如 `v1.1.2`）就是那一版的完整原始碼。
+- PyMuPDF 1.27.2.2（MuPDF 1.27.2）：https://github.com/pymupdf/PyMuPDF/releases/tag/1.27.2.2 ，MuPDF 原始碼在 https://mupdf.com/releases
+- 建置方式：Python 3.14 和 PyInstaller 6.22.3，執行 `build.py`，套件版本見 `requirements.txt`。
 
-自行打包並散布給他人時，請以同樣方式提供你的對應原始碼。
+自行打包散布時，也請用同樣的方式提供對應原始碼。
 
-## LGPL 元件說明
+## LGPL（FFmpeg、chardet）
 
-FFmpeg 與 chardet 以 LGPL 授權。打包版以**獨立檔案**形式包含（FFmpeg 為 `_internal\av.libs\` 內的 DLL，隨 PyAV 18.1.0 提供；chardet 為 `_internal\` 內的 Python 模組），可自行以相容版本替換。
-其原始碼可由上表網址取得（PyAV：https://github.com/PyAV-Org/PyAV/releases/tag/v18.1.0 ）。
+FFmpeg 和 chardet 採 LGPL 授權，在打包版裡是獨立的檔案，可以換成相容的版本：FFmpeg 是 `_internal\av.libs\` 裡的 DLL，隨 PyAV 18.1.0 附帶；chardet 是 `_internal\` 裡的 Python 模組。原始碼可從上表的網址取得，PyAV 在 https://github.com/PyAV-Org/PyAV/releases/tag/v18.1.0 。
 
 ## 商標
 
-Claude、Claude Code 為 Anthropic 的商標；Codex、ChatGPT 為 OpenAI 的商標。本程式與上述公司無關，僅呼叫使用者自行安裝的命令列工具。
+Claude、Claude Code 是 Anthropic 的商標；Codex、ChatGPT 是 OpenAI 的商標。本程式與這兩家公司無關，只是呼叫使用者自己安裝的命令列工具。

@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
-"""語音辨識：faster-whisper（CPU）+ OpenCC 簡轉繁；語音模型的尋找、檢查、下載。
+"""語音辨識（faster-whisper，CPU）與語音模型下載。
 
-沿用 臨時會議轉錄\\transcribe.py 的做法：
-- 先把音檔轉成 16k 單聲道 wav 存在工作資料夾（之後續跑、播放片段都用它）
-- 邊跑邊寫 jsonl，中斷後再跑會從最後一段之後續跑
-- faster-whisper 1.2 指定 clip_timestamps 會忽略 VAD，所以續跑時自行切音訊陣列再加回偏移量
+音檔先轉成 16k wav 放在工作資料夾，續跑和播放片段都用它。辨識結果邊跑邊寫 jsonl，
+中斷後從最後一段接著跑。faster-whisper 1.2 指定 clip_timestamps 會忽略 VAD，
+所以續跑時自己切音訊陣列，再把時間加回去。
 
-模型位置（依序尋找）：
-1. 這台電腦的 %LOCALAPPDATA%\\錄音轉文字\\models\\<名稱>\\（下載預設存這裡）
-2. 程式資料夾的 models\\<名稱>\\（離線攜帶用）
-3. 使用者自選的資料夾
+模型找的順序：%LOCALAPPDATA%\\錄音轉文字\\models、程式資料夾的 models、使用者自選的資料夾。
 """
 import json
 import os
@@ -54,7 +50,6 @@ def model_dirs() -> list:
 
 
 def check_model(path: Path) -> list:
-    """回傳缺少的檔案清單（空清單表示齊全）。"""
     path = Path(path)
     missing = [f for f in REQUIRED if not (path / f).exists()]
     if not ((path / "vocabulary.json").exists() or (path / "vocabulary.txt").exists()):
@@ -63,7 +58,6 @@ def check_model(path: Path) -> list:
 
 
 def list_models() -> list:
-    """回傳 [(顯示名稱, 路徑)]：兩個預設位置中齊全的模型。"""
     out, seen = [], set()
     for d in model_dirs():
         if not d.exists():
@@ -77,8 +71,7 @@ def list_models() -> list:
 
 
 def download_model(name: str, progress, cancel, log) -> Path:
-    """從 Hugging Face 下載模型到 user_models_dir()/name。progress(已下載位元組, 總位元組)。
-    以 .part 暫存、支援續傳；取消時保留 .part，下次可接著下載。"""
+    """先存成 .part，取消時保留，下次接著下載。"""
     import requests
     from huggingface_hub import HfApi, hf_hub_url
     repo = DOWNLOADS[name][0]
@@ -120,9 +113,7 @@ def download_model(name: str, progress, cancel, log) -> Path:
     return dest
 
 
-# ---------- 音訊 ----------
 def ensure_wav(audio: Path, wav: Path, log) -> np.ndarray:
-    """把音檔轉成 16k wav（已存在就直接讀），回傳 float32 陣列。"""
     if wav.exists():
         with wave.open(str(wav), "rb") as w:
             data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
@@ -146,7 +137,7 @@ def read_rows(jsonl: Path) -> list:
 
 def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str,
                language: str = "中文（繁體輸出）", threads: int = 4) -> list:
-    """辨識整個音檔，回傳段落列表。progress(已辨識秒, 總秒, 預估剩餘秒)；cancel 為 threading.Event。"""
+    """progress(已辨識秒, 總秒, 預估剩餘秒)"""
     miss = check_model(Path(model_dir))
     if miss:
         raise RuntimeError(f"語音模型不完整（{model_dir}），缺少：{'、'.join(miss)}")
@@ -177,7 +168,6 @@ def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str
         initial_prompt=f"以下是{context_text()}的繁體中文錄音。" if lang == "zh" else None,
         condition_on_previous_text=False,
     )
-    # 只有中文做簡轉繁（自動偵測為中文、或多語混合時也轉，英文與假名不受影響）
     to_trad = lang == "zh" or multi or (lang is None and info.language == "zh")
     cc = OpenCC("s2tw") if to_trad else None  # 不用 s2twp：會把「权限」轉成「許可權」
     if lang is None and not multi:
@@ -209,7 +199,6 @@ def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str
 
 
 def clip_wav(workdir: Path, start: float, end: float, out: Path) -> Path:
-    """從 16k wav 切出 start～end 秒，供播放。"""
     with wave.open(str(workdir / "audio_16k.wav"), "rb") as w:
         n = w.getnframes()
         s, e = max(0, int(start * SR)), min(n, int(end * SR))

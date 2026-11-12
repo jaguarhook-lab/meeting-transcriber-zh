@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""AI 引擎：Claude Code 與 Codex 的偵測、呼叫、登入、用量頁、使用上限判斷。
+"""呼叫 Claude Code／Codex 命令列工具。
 
-- 一律走使用者的訂閱帳號：呼叫時移除 ANTHROPIC_API_KEY／OPENAI_API_KEY，避免改走 API 計費。
-- 指示與逐字稿一律從標準輸入送入，避免中文與換行經過 cmd 參數跳脫出錯。
+呼叫時移除 ANTHROPIC_API_KEY、OPENAI_API_KEY，讓它用訂閱帳號而不是 API 計費。
+內容從標準輸入送進去，避免中文和換行在命令列參數裡被弄壞。
 """
 import datetime as dt
 import os
@@ -16,7 +16,7 @@ NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class LimitError(RuntimeError):
-    """AI 回報使用上限。reset 為預計恢復時間（datetime，可能為 None）。"""
+    """reset：預計恢復時間，不知道時為 None。"""
 
     def __init__(self, engine: str, message: str, reset: dt.datetime | None):
         self.engine, self.message, self.reset = engine, message, reset
@@ -61,7 +61,6 @@ def other(engine: str) -> str:
 
 
 def open_login(engine: str) -> None:
-    """開一個新的 PowerShell 視窗執行登入指令。"""
     exe = find(engine)
     if not exe:
         raise RuntimeError(f"找不到 {engine}，請先安裝（按「安裝說明」）。")
@@ -72,14 +71,13 @@ def open_login(engine: str) -> None:
                      creationflags=subprocess.CREATE_NEW_CONSOLE)
 
 
-# ---------- 使用上限判斷 ----------
-# 只比對兩家服務實際會出現的英文訊息；不放中文詞（逐字稿常有「額度」「上限」，會誤判）
+# 只比對英文訊息；逐字稿裡常有「額度」「上限」，放中文會誤判
 LIMIT_PAT = re.compile(r"usage limit|rate limit|hit your (?:usage )?limit|limit reached|limit has been reached|"
                        r"too many requests|status(?: code)?:? 429|\b429 too many|quota exceeded|out of credits", re.I)
 
 
 def _at_clock(text: str, now: dt.datetime) -> dt.datetime | None:
-    """解析 '3pm'、'3:05 PM'、'15:00' 這類時刻，回傳下一個該時刻。"""
+    """'3pm'、'3:05 PM'、'15:00' → 下一個該時刻"""
     m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?", text, re.I)
     if not m:
         return None
@@ -95,7 +93,6 @@ def _at_clock(text: str, now: dt.datetime) -> dt.datetime | None:
 
 
 def parse_reset(msg: str, now: dt.datetime | None = None) -> dt.datetime | None:
-    """從錯誤訊息找預計恢復時間；找不到回傳 None（不猜）。"""
     now = now or dt.datetime.now()
     m = re.search(r"\|\s*(\d{10})\b", msg)  # 舊版 Claude Code：「...limit reached|1731250800」
     if m:
@@ -119,9 +116,8 @@ def check_limit(engine: str, text: str) -> None:
         raise LimitError(engine, text.strip()[-500:], parse_reset(text))
 
 
-# ---------- 呼叫 ----------
 def run(engine: str, prompt: str, timeout: int = 1800) -> str:
-    """把 prompt 從標準輸入送給選定的 AI，回傳輸出文字。上限時丟 LimitError，其他失敗丟 RuntimeError。"""
+    """碰到使用上限丟 LimitError，其他失敗丟 RuntimeError。"""
     exe = find(engine)
     if not exe:
         raise RuntimeError(f"找不到 {engine}。請先安裝並登入（按「安裝說明」）。")

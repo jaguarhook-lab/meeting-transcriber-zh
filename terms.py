@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""專有名詞：共用對照表、套用校正、請 AI 找疑問詞。"""
+"""對照表與專有名詞校正。"""
 import json
 import re
 import shutil
 from pathlib import Path
 
-import ai_engines
+import engines
 from common import GLOSSARY, GLOSSARY_EXAMPLE, context_full, context_text, hms, known_pairs, known_prompt, load_known
 
 
 def ensure_glossary(path: Path = GLOSSARY) -> None:
-    """沒有對照表時，從範例複製一份開始用。"""
     if not path.exists() and GLOSSARY_EXAMPLE.exists():
         shutil.copyfile(GLOSSARY_EXAMPLE, path)
 
@@ -28,7 +27,7 @@ def load_glossary(path: Path = GLOSSARY) -> list:
 
 
 def add_to_glossary(pairs: list, path: Path = GLOSSARY) -> int:
-    """把新對照加到共用對照表最後面（已有的原詞不重複加）。回傳新增筆數。"""
+    """回傳新增筆數。"""
     have = {b for b, _ in load_glossary(path)}
     new = [(b, g) for b, g in pairs if b and g and b != g and b not in have]
     if new:
@@ -39,8 +38,8 @@ def add_to_glossary(pairs: list, path: Path = GLOSSARY) -> int:
 
 
 def apply(rows: list, pairs: list) -> tuple[list, dict]:
-    """依序替換（長詞優先），回傳新段落與各對照的替換次數。"""
-    pairs = sorted({(b, g) for b, g in pairs if b and b != g}, key=lambda p: -len(p[0]))  # 原詞與改為相同的不算
+    """長詞先換。"""
+    pairs = sorted({(b, g) for b, g in pairs if b and b != g}, key=lambda p: -len(p[0]))
     counts = {p: 0 for p in pairs}
     out = []
     for r in rows:
@@ -59,7 +58,6 @@ def to_text(rows: list) -> str:
 
 
 def occurrences(rows: list, word: str, limit: int = 3) -> tuple[int, list]:
-    """回傳出現次數與前幾個 (秒, 該段文字)。"""
     n, ex = 0, []
     for r in rows:
         c = r["text"].count(word)
@@ -86,15 +84,15 @@ TERMS_PROMPT = """以下是{情境}的語音辨識逐字稿，繁體中文，每
 
 
 def find_suspects(rows: list, log, engine: str = "Claude Code") -> list:
-    """請 Claude Code 找疑問詞，回傳 [{原詞, 建議, 類別, 理由, 次數, 例句}]（只保留逐字稿真的有的詞）。"""
+    """只保留逐字稿裡真的有的詞。"""
     log(f"請 {engine} 找疑似誤辨識的專有名詞（約需數分鐘）…")
     known = load_known()
     note = ("以下是寫法已確認正確的已知名詞（括號內為說明），不要列出；但逐字稿中它們的音近錯字仍要列，"
             "建議寫法用這裡的寫法：\n" + known_prompt() + "\n\n") if known else ""
     bg = context_full()
-    if "\n" in bg:  # 情境說明有第二行以後的背景說明，一併提供
+    if "\n" in bg:
         note = "背景資料：\n" + bg + "\n\n" + note
-    out = ai_engines.run(engine, TERMS_PROMPT.replace("{情境}", context_text()).replace("逐字稿：\n", note + "逐字稿：\n")
+    out = engines.run(engine, TERMS_PROMPT.replace("{情境}", context_text()).replace("逐字稿：\n", note + "逐字稿：\n")
                          + to_text(rows))
     m = re.search(r"\[.*\]", out, re.S)
     if not m:
@@ -107,7 +105,7 @@ def find_suspects(rows: list, log, engine: str = "Claude Code") -> list:
         raise RuntimeError(f"{engine} 回傳的不是清單：{out[:200]}")
 
     def text(v) -> str:
-        """只接受字串（數字也可）；null、清單、物件一律視為空白，不讓 "None" 之類的字被當成建議寫法。"""
+        # null、清單、物件都當空白，免得 "None" 被當成建議寫法
         return str(v).strip() if isinstance(v, (str, int, float)) and not isinstance(v, bool) else ""
 
     items, seen, bad = [], set(), 0
@@ -131,7 +129,6 @@ def find_suspects(rows: list, log, engine: str = "Claude Code") -> list:
 
 
 def write_record(path: Path, applied: dict, pending: list) -> None:
-    """校正紀錄：套用的對照與次數、待確認詞。"""
     md = ["# 逐字稿校正紀錄", "", "| 原辨識 | 校正為 | 次數 |", "|---|---|---|"]
     md += [f"| {b} | {g} | {c} |" for (b, g), c in applied.items() if c]
     md += ["", f"合計替換 {sum(applied.values())} 處。", ""]

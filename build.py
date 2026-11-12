@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-"""打包成可攜資料夾 dist\\錄音轉文字\\（不含語音模型；模型在第一次使用時下載到 %LOCALAPPDATA%\\錄音轉文字\\models）。
+"""python build.py → dist\\錄音轉文字\\（不含語音模型）
 
-用法：python build.py
-注意：PyInstaller 會清空 dist\\錄音轉文字\\，所以先備份裡面的 對照表.tsv（可能有使用者新增的詞），打包後放回。
+PyInstaller 會清空輸出資料夾，所以先備份裡面的對照表與已知名詞，打包後放回。
 """
 import shutil
 import subprocess
@@ -22,7 +21,7 @@ def main() -> int:
         shutil.copy2(DIST / "對照表.tsv", backup)
         print("已備份可攜版對照表：", backup.name)
     known_bak = None
-    if (DIST / "已知名詞.txt").exists():  # 使用者可能在校正畫面新增過已知名詞
+    if (DIST / "已知名詞.txt").exists():
         known_bak = HERE / f"已知名詞_打包前備份_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         shutil.copy2(DIST / "已知名詞.txt", known_bak)
         print("已備份可攜版已知名詞：", known_bak.name)
@@ -32,7 +31,7 @@ def main() -> int:
            "--collect-data", "faster_whisper", "--collect-binaries", "ctranslate2", "--collect-all", "onnxruntime",
            "--collect-data", "opencc", "--collect-all", "av", "--collect-all", "pymupdf", "--hidden-import", "tokenizers",
            "--hidden-import", "markdown.extensions.tables", "--hidden-import", "markdown.extensions.sane_lists"]
-    # 環境中有、但本程式用不到的大型套件：排除以縮小體積
+    # 環境裡有但用不到的大套件
     for m in ("matplotlib", "pandas", "scipy", "sqlalchemy", "PIL", "lxml", "cryptography", "bcrypt", "aiohttp",
               "pydantic", "pydantic_core", "orjson", "greenlet", "kiwisolver", "contourpy", "email_validator",
               "IPython", "jupyter", "notebook", "pytest", "win32com", "pythoncom"):
@@ -44,7 +43,6 @@ def main() -> int:
 
     if backup or (HERE / "對照表.tsv").exists():
         shutil.copy2(backup or HERE / "對照表.tsv", DIST / "對照表.tsv")
-    # 情境說明：本機有自己的版本就用，沒有就放範例
     shutil.copy2(HERE / "情境說明.txt" if (HERE / "情境說明.txt").exists() else HERE / "情境說明.範例.txt",
                  DIST / "情境說明.txt")
     if known_bak or (HERE / "已知名詞.txt").exists():

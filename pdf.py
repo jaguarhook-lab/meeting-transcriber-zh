@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Markdown 轉 PDF：python-markdown 轉 HTML，再用 PyMuPDF（程式內建）排版輸出，不需要 Edge 或 Chrome。"""
+"""Markdown 轉 PDF（python-markdown + PyMuPDF）。"""
 import os
 import re
 import tempfile
@@ -8,7 +8,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 import markdown
 
-# 中文字型：依序尋找（regular, bold）；粗體找不到就用 regular
+# (一般, 粗體)，沒有粗體就用一般
 FONT_CANDIDATES = [
     ("msjh.ttc", "msjhbd.ttc"),      # 微軟正黑體
     ("mingliu.ttc", None),           # 新細明體
@@ -35,7 +35,6 @@ MARGIN = (40, 45, -40, -45)  # 左、上、右、下（點）≈ 14mm／16mm
 
 
 def find_fonts() -> tuple[Path, str, str]:
-    """回傳 (字型資料夾, regular 檔名, bold 檔名)。"""
     fonts = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
     for reg, bold in FONT_CANDIDATES:
         if (fonts / reg).exists():
@@ -46,12 +45,11 @@ def find_fonts() -> tuple[Path, str, str]:
 
 _T = r"\d{1,2}:\d{2}:\d{2}"   # 錄音時間點一律是 hh:mm:ss；「09:30」這種一般時刻不刪
 _S = r"[ \t]*"                  # 只吃水平空白，不吃換行
-# 只含錄音時間點的括號，例如（00:12:47–00:13:05）、（00:06:59–00:07:09、00:13:37–00:13:50）
+# 例：（00:12:47–00:13:05）、（00:06:59–00:07:09、00:13:37–00:13:50）
 TIMESTAMPS = re.compile(rf"{_S}[（(]{_S}{_T}(?:{_S}[–—\-~～至]{_S}{_T})?(?:{_S}[、,，;；]{_S}{_T}(?:{_S}[–—\-~～至]{_S}{_T})?)*{_S}[）)]")
 
 
 def strip_timestamps(text: str) -> str:
-    """拿掉只含錄音時間點的括號（PDF 不顯示時間點；md 保留）。"""
     return TIMESTAMPS.sub("", text)
 
 
@@ -59,7 +57,7 @@ LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 
 
 def ensure_breaks(text: str) -> str:
-    """補空行：清單前、粗體標籤行（**背景**：…）前要空一行，否則 Markdown 會把它們併成同一段。"""
+    """清單和「**背景**：」這類行前面沒空行的話，Markdown 會併成同一段。"""
     out = []
     for line in text.splitlines():
         prev = out[-1] if out else ""
@@ -72,7 +70,6 @@ def ensure_breaks(text: str) -> str:
 
 
 def md_to_pdf(src: Path, dst: Path) -> Path:
-    """轉出 PDF 到 dst（dst 已存在時是否覆蓋由呼叫端決定；產生記錄時一律給新檔名）。PDF 不顯示錄音時間點。"""
     fonts, reg, bold = find_fonts()
     # python-markdown 巢狀清單要 4 格縮排：把行首每 2 格放大成 4 格
     text = "\n".join(" " * (2 * (len(l) - len(l.lstrip(" ")))) + l.lstrip(" ")
@@ -81,7 +78,7 @@ def md_to_pdf(src: Path, dst: Path) -> Path:
     story = fitz.Story(html=f"<body>{body}</body>", user_css=CSS % {"reg": reg, "bold": bold},
                        archive=fitz.Archive(str(fonts)))
     dst = Path(dst)
-    # 先寫到本機暫存，字型子集化後再存到輸出資料夾（未子集化的檔案含整套字型，約 35 MB）
+    # 先寫到暫存再做字型子集化，不然整套字型會讓檔案大到約 35 MB
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         raw = Path(td) / "raw.pdf"
         w = fitz.DocumentWriter(str(raw))

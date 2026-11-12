@@ -1,22 +1,19 @@
 # -*- coding: utf-8 -*-
-"""比對 AI 原稿與使用者改好的會議記錄，找出改過的詞（供「從我的修改學習」）。
+"""「從我的修改學習」：比對原稿和改好的會議記錄，找出改過的詞。
 
-只列「像名詞校正」的修改，避免把一般內容修訂學成永久替換規則：
-- 排除數字、日期、時間、金額的修改（例：100 萬 → 200 萬）
-- 排除純插入的文字（例：補上職稱）
-- 優先以 AI 原稿中標了（?）的完整詞為單位（含 **粗體** 等 Markdown 邊界）
-- 抓不到完整詞的，標「需確認」，由使用者自行修正原寫法與改為
+只列像名詞校正的修改。數字、日期、金額的修改和純插入的文字不列，
+免得把內容修訂學成替換規則。以標了（?）的詞為單位；抓不到完整的詞就標「需確認」。
 """
 import difflib
 import re
 
 Q = "（?）"
-WORD = re.compile(r"[\w㐀-鿿]")       # 中文、英數字
+WORD = re.compile(r"[\w㐀-鿿]")     
 ASCII = re.compile(r"[A-Za-z0-9]")
 DIGIT = re.compile(r"\d")
-MAX_LEN = 12   # 超過這個長度的改寫視為整句改寫，不列為詞
-GAP = 3        # 兩處修改之間只隔幾個字以內，視為同一個詞的修改（例如「王曉明（?）」→「王小明」）
-# AI 原稿中標了（?）的詞：出現在行首、清單符號、標點、括號、粗體或引號之後
+MAX_LEN = 12   # 更長的算整句改寫
+GAP = 3        # 兩處修改相隔幾個字以內算同一個詞，例如「王曉明（?）」→「王小明」
+# 標了（?）的詞，前面是行首、清單符號、標點、括號、粗體或引號
 Q_WORD = re.compile(r"(?:^|(?<=[-\s、／/：:，,。；;（(「『【《*_]))([\w㐀-鿿][\w㐀-鿿 .&-]{0,10}?)（\?）", re.M)
 NEED_CHECK = "需確認：只差一個字或抓不到完整的詞，請修正原寫法與改為"
 
@@ -30,7 +27,6 @@ def _has_word(s: str) -> bool:
 
 
 def _numeric_change(a: str, b: str) -> bool:
-    """數字、日期、時間、金額的修改：兩邊都有數字且數字不同，或其中一邊幾乎全是數字符號。"""
     da, db = "".join(DIGIT.findall(a)), "".join(DIGIT.findall(b))
     if (da or db) and da != db:
         return True
@@ -45,7 +41,7 @@ def _left_run(text: str, end: int, limit: int = 8) -> str:
 
 
 def _hunks(sm) -> list:
-    """把相鄰的修改（中間只隔 GAP 個以內的中文或英數字）合併成一段。回傳 [(i1, i2, j1, j2)]。"""
+    """相隔 GAP 字以內的修改併成一段。"""
     out = []
     for op, i1, i2, j1, j2 in sm.get_opcodes():
         if op == "equal":
@@ -53,7 +49,7 @@ def _hunks(sm) -> list:
         if out:
             pi1, pi2, pj1, pj2 = out[-1]
             gap = sm.a[pi2:i1]
-            closed = sm.a[pi1:pi2].endswith(Q)  # 前一段以（?）結尾＝前一個詞已結束（例如「黃小明（?）跟協定（?）」）
+            closed = sm.a[pi1:pi2].endswith(Q)  # 以（?）結尾表示前一個詞已結束
             if not closed and i1 - pi2 <= GAP and all(WORD.match(c) for c in gap):
                 out[-1] = (pi1, i2, pj1, j2)
                 continue
@@ -62,7 +58,7 @@ def _hunks(sm) -> list:
 
 
 def pending_words(text: str) -> set:
-    """從 AI 的待確認清單取出標了（?）的詞（清單每項開頭就是完整的詞，比正文可靠）。"""
+    """待確認清單每項開頭就是完整的詞，比從正文抓可靠。"""
     words = set(Q_WORD.findall(text))
     for line in text.splitlines():
         m = re.match(r"^\s*[-*]\s+\**([\w㐀-鿿][\w㐀-鿿 .&-]{0,10}?)\**(?:（\?）|[（(：:、，,])", line)
@@ -72,7 +68,7 @@ def pending_words(text: str) -> set:
 
 
 def _q_spans(orig: str, pend: set) -> list:
-    """AI 原稿中標了（?）的詞：[(詞開始, 「（?）」結束, 詞, 是否來自待確認清單)]。
+    """[(開始, 結束, 詞, 是否可信)]。
     正文中文詞前面常沒有標點，抓到的可能多帶前面的字（例「今天王曉明」）：
     對得到待確認清單的詞就以清單為準；對不到時，交給 diff_edits 以實際修改的範圍為準並標需確認。"""
     out = []
@@ -82,7 +78,7 @@ def _q_spans(orig: str, pend: set) -> list:
         if hit:
             out.append((e - len(hit), e + len(Q), hit, True))
         else:
-            # 3 個字以內（多數人名、簡稱）視為完整的詞；更長的可能多帶前面的字，交給 diff_edits 縮小並標需確認
+            # 3 個字以內多半是人名或簡稱，直接當完整的詞
             out.append((s, e + len(Q), w, len(w) <= 3))
     return out
 
@@ -92,7 +88,6 @@ def diff_edits(orig: str, edited: str, pend: set = frozenset()) -> tuple[list, i
     pend：AI 待確認清單中的詞（有的話，用來判斷完整的詞）。
     - 「王曉明（?）」→「王小明」：原=王曉明、改=王小明（以標了（?）的完整詞為單位）
     - 只刪掉「（?）」：原=改=該詞（代表使用者確認寫法正確）"""
-    # AI 原稿中標了（?）的完整詞所在位置
     q_spans = _q_spans(orig, set(pend))
     sm = difflib.SequenceMatcher(None, orig, edited, autojunk=False)
     found, skipped = {}, 0
@@ -104,14 +99,13 @@ def diff_edits(orig: str, edited: str, pend: set = frozenset()) -> tuple[list, i
         it["次數"] += 1
 
     def q_span_of(i1, i2):
-        """這段修改落在哪一個標了（?）的詞上（重疊即算）。回傳 (開始, 結束, 詞, 來自待確認清單)。"""
         for s, e, w, sure in q_spans:
             if i1 < e and i2 > s:
                 return s, e, w, sure
         return None
 
     def narrow(span, i1):
-        """不是來自待確認清單的詞：只取「修改開始處～（?）」這段（至少 2 個字），比 AI 標的詞短時標需確認。"""
+        """不可信的詞只取「修改開始處～（?）」，至少 2 個字。"""
         s, e, w, sure = span
         if sure:
             return s, ""
@@ -146,14 +140,14 @@ def diff_edits(orig: str, edited: str, pend: set = frozenset()) -> tuple[list, i
         note = ""
         span = q_span_of(i1, i2)
         if span:
-            # 以標了（?）的完整詞為單位：把修改往左右擴到整個詞（兩邊相同的部分也一起帶上）
+            # 擴到整個標了（?）的詞
             s, note = narrow(span, i1)
             e = span[1]
             left, right = max(0, i1 - s), max(0, e - i2)
             ca = _core(orig[min(s, i1):max(e, i2)])
             cb = _core(edited[max(0, j1 - left):j2 + right])
         else:
-            # 英數字：補成完整字串（例如 MSNC → MSMC）
+            # 英數字補成完整字串，例如 MSNC → MSMC
             while i1 > 0 and j1 > 0 and ASCII.match(orig[i1 - 1]) and orig[i1 - 1] == edited[j1 - 1]:
                 i1, j1 = i1 - 1, j1 - 1
             while i2 < len(orig) and j2 < len(edited) and ASCII.match(orig[i2]) and orig[i2] == edited[j2]:
