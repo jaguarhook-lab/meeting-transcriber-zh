@@ -42,7 +42,10 @@
 3. 會議名稱預設是音檔檔名，可以改，輸出的檔案都以它開頭。
 4. 「特別整理的主題」可以不填。填了的話，會另外整理一份這個主題的內容。
 5. 確認設定區的 AI、語音模型、語言。
-6. 按「① 開始辨識」。進度條會顯示預估剩餘時間。中途取消或關掉程式都沒關係，下次用同一個會議名稱再按一次，會從中斷的地方接著跑。
+6. 按「① 開始辨識」。辨識分四個階段：1 轉換音檔 → 2 載入語音模型 → 3 偵測說話段落（長錄音要幾分鐘）→ 4 辨識中（顯示已辨識時間與預估剩餘）。
+   進度區有一隻小手 ✍，會把剛辨識出來的句子一個字一個字寫出來，下方細條是完成比例；還不知道要多久的階段，小手會一直寫出目前在做什麼。
+   任何階段都可以按「取消」，1～2 秒內停止（按鈕會先顯示「停止中…」）。已辨識的段落都已存檔，下次用同一個會議名稱再按一次，會從中斷的地方接著跑。
+   「③ 產生會議記錄」進行中也可以取消，會停掉 AI，不會留下寫到一半的檔案；畫面會顯示 AI 已經寫了多久。
 7. 辨識完會開啟「② 校正專有名詞」畫面。對照表裡的詞已經先換好，AI 會再列出疑似聽錯的人名、公司名和專有名詞，大約要幾分鐘。
 
    點一個詞，下方會列出它出現的句子。可以按「▶ 播放原音」聽前後約 12 秒，在「改為」填正確寫法後按「更新選取項目」。勾「加入共用對照表」，以後的錄音也會自動替換。
@@ -114,9 +117,10 @@
 
 | 按鈕 | 作用 |
 |---|---|
-| 登入帳號 | 開一個視窗登入，會跳出瀏覽器。Claude Code 已登入時，可以在視窗輸入 `/login` 換帳號，`/exit` 離開。 |
+| 登入帳號 | 開一個視窗登入，會跳出瀏覽器。Claude Code 已登入時，可以在視窗輸入 `/login` 換帳號，`/exit` 離開。登入視窗開著時再按不會重開。 |
 | 查看用量 | 開啟該 AI 的用量網頁。 |
-| 安裝說明 | 顯示安裝指令，可以複製。 |
+| 一鍵安裝 | 沒裝時出現（狀態「● 未安裝」紅字）。按下確認後在背景從官方網站安裝，見第六節。 |
+| 安裝說明 | 已安裝時出現，顯示手動安裝的方法。 |
 
 程式一律用你的訂閱帳號：Claude Code 用 claude.ai 帳號，Codex 用 ChatGPT 帳號。呼叫時會拿掉 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 環境變數，所以不會改走 API 另外計費。3 小時的會議大約 8 萬字，找詞和寫記錄都會用掉不少額度。
 
@@ -128,37 +132,35 @@
 
 換電腦時要裝一次，不需要 VS Code。兩個至少裝一個；都沒裝的話，還是可以辨識、用對照表和手動新增來校正、重新產生 PDF。
 
-### Claude Code
+### 一鍵安裝（建議）
 
-1. 沒有 Git 的話，先安裝 Git for Windows：https://git-scm.com
-2. 在 PowerShell 執行：
+1. 在「AI（解析與撰寫）」選要裝的 Claude Code 或 Codex，狀態是「● 未安裝」時按「一鍵安裝」→「確定」。
+2. 程式在背景從官方網站下載安裝，約幾分鐘，不會跳出黑色視窗，進度寫在下方紀錄。不需要系統管理員權限，也不需要先裝 Git 或 Node.js。
+3. 裝完會自動把安裝位置加進 PATH、確認版本，狀態變「● 已安裝」，再問要不要登入帳號。**不用重開程式。**
+   - Claude Code：用 claude.ai 帳號登入（需 Pro、Max、Team 等付費方案）。
+   - Codex：用 ChatGPT 帳號登入。
+4. 安裝中可以按「取消」。
 
-   ```powershell
-   irm https://claude.ai/install.ps1 | iex
-   ```
+安裝失敗會跳出說明視窗，寫出原因與建議，例如連不到官方網站（公司防火牆或 Proxy）、所在地區無法下載、PowerShell 被公司政策限制、32 位元 Windows（兩者都只支援 64 位元）。視窗上有「複製錯誤訊息」可以傳給負責的同事，完整安裝紀錄存在 `%LOCALAPPDATA%\錄音轉文字\logs\安裝_*.log`。
 
-   已經有 Node.js 18 以上的話，也可以用：
+### 手動安裝（一鍵安裝不行時）
 
-   ```powershell
-   npm install -g @anthropic-ai/claude-code
-   ```
+在「開始」搜尋 PowerShell 並開啟，貼上對應的指令按 Enter：
 
-3. 重開 PowerShell，在程式按「登入帳號」（或在 PowerShell 輸入 `claude`），用 claude.ai 帳號登入。
-4. 更新用 `claude update`，不行的話執行 `npm install -g @anthropic-ai/claude-code@latest`。
+```powershell
+# Claude Code（裝到 %USERPROFILE%\.local\bin）
+irm https://claude.ai/install.ps1 | iex
 
-### Codex
+# Codex（裝到 %LOCALAPPDATA%\Programs\OpenAI\Codex\bin）
+irm https://chatgpt.com/codex/install.ps1 | iex
+```
 
-1. 安裝 Node.js 18 以上的 LTS 版：https://nodejs.org
-2. 在 PowerShell 執行：
+裝好後重新開啟本程式，按「登入帳號」。更新：Claude Code 會自動更新；Codex 執行 `codex update` 或再跑一次安裝指令。
 
-   ```powershell
-   npm install -g @openai/codex
-   ```
+### 找不到已安裝的工具時
 
-3. 在程式按「登入帳號」（或輸入 `codex login`），用 ChatGPT Plus 以上的帳號登入。
-4. 更新時再執行一次安裝指令。
-
-裝好後在程式切換到該 AI，會顯示「● 已安裝」。沒有的話，重開程式。
+程式會依序找：目前的 PATH → 重新讀取 Windows 登錄檔裡的 PATH → 常見安裝位置（`.local\bin`、`Programs\OpenAI\Codex\bin`、`%APPDATA%\npm`）。
+從後兩者找到時，紀錄會寫出找到的路徑，並自動補進本程式的 PATH，所以裝好但沒加進 PATH 的電腦也能用。
 
 ---
 

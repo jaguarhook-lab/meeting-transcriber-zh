@@ -36,3 +36,6 @@ models/
 *_專題整理*.pdf
 _播放片段.wav
 環境檢測.log
+
+# 開發流程筆記（Simple SDD 提案與任務）
+sdd/

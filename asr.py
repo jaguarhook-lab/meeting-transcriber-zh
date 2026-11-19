@@ -121,23 +121,48 @@ def ensure_wav(audio: Path, wav: Path, log) -> np.ndarray:
     from faster_whisper import decode_audio
     log("音檔轉換中（轉成 16k 單聲道）…")
     a = decode_audio(str(audio), sampling_rate=SR)
-    with wave.open(str(wav), "wb") as w:
+    tmp = wav.with_name(wav.name + ".tmp")          # 先寫暫存再改名：轉檔途中被取消不會留下半個 wav
+    with wave.open(str(tmp), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(SR)
         w.writeframes((np.clip(a, -1, 1) * 32767).astype(np.int16).tobytes())
+    os.replace(tmp, wav)
     return a
 
 
 def read_rows(jsonl: Path) -> list:
+    """讀逐字稿；程序被中途結束時最後一行可能沒寫完，略過讀不懂的行。"""
     if not jsonl.exists():
         return []
-    return [json.loads(l) for l in jsonl.read_text(encoding="utf-8").splitlines() if l.strip()]
+    out = []
+    for l in jsonl.read_text(encoding="utf-8", errors="replace").splitlines():
+        if l.strip():
+            try:
+                out.append(json.loads(l))
+            except ValueError:
+                pass
+    return out
+
+
+def repair_jsonl(jsonl: Path) -> None:
+    """最後一行沒有換行（寫到一半被結束）→ 切掉那半行，續跑時才不會接在壞行後面。"""
+    if not jsonl.exists():
+        return
+    data = jsonl.read_bytes()
+    if data and not data.endswith(b"\n"):
+        with jsonl.open("r+b") as f:
+            f.truncate(data.rfind(b"\n") + 1)
+
+
+STAGES = 4
 
 
 def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str,
-               language: str = "中文（繁體輸出）", threads: int = 4) -> list:
-    """progress(已辨識秒, 總秒, 預估剩餘秒)"""
+               language: str = "中文（繁體輸出）", threads: int = 4, stage=None, on_text=None) -> list:
+    """progress(已辨識秒, 總秒, 預估剩餘秒)；stage(第幾階段, 說明)；on_text(剛辨識出的句子)。"""
+    stage = stage or (lambda n, s: None)
+    on_text = on_text or (lambda s: None)
     miss = check_model(Path(model_dir))
     if miss:
         raise RuntimeError(f"語音模型不完整（{model_dir}），缺少：{'、'.join(miss)}")
@@ -145,9 +170,11 @@ def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str
     workdir.mkdir(parents=True, exist_ok=True)
     wav = workdir / "audio_16k.wav"
     jsonl = workdir / "逐字稿_原始.jsonl"
+    stage(1, "轉換音檔")
     audio_arr = ensure_wav(audio, wav, log)
     duration = len(audio_arr) / SR
 
+    repair_jsonl(jsonl)
     rows = read_rows(jsonl)
     offset = rows[-1]["end"] if rows else 0.0
     if offset >= duration - 1:
@@ -159,8 +186,10 @@ def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str
 
     from faster_whisper import WhisperModel
     from opencc import OpenCC
+    stage(2, "載入語音模型")
     log(f"載入語音模型（{Path(model_dir).name}），語言：{language}…")
     model = WhisperModel(model_dir, device="cpu", compute_type="int8", cpu_threads=threads)
+    stage(3, "偵測說話段落")                      # transcribe() 會先對整段音訊做語音偵測，長錄音要幾分鐘
     segments, info = model.transcribe(
         audio_arr[int(offset * SR):],
         language=lang, multilingual=multi, beam_size=2, vad_filter=True,
@@ -173,6 +202,8 @@ def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str
     if lang is None and not multi:
         log(f"自動偵測語言：{info.language}（信心 {info.language_probability:.0%}）")
     log(f"開始辨識，音檔長度 {hms(duration)}")
+    stage(4, "辨識中")
+    progress(offset, duration, 0)
     t0 = time.time()
     with jsonl.open("a", encoding="utf-8") as f:
         for seg in segments:
@@ -187,6 +218,7 @@ def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str
                 rows.append(row)
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 f.flush()
+                on_text(text)
                 done = row["end"] - offset
                 ratio = (time.time() - t0) / max(done, 1)
                 progress(row["end"], duration, (duration - row["end"]) * ratio)
@@ -196,6 +228,62 @@ def transcribe(audio: Path, workdir: Path, log, progress, cancel, model_dir: str
     progress(duration, duration, 0)
     log(f"辨識完成：{len(rows)} 段，耗時 {hms(time.time() - t0)}")
     return rows
+
+
+def worker(q, audio: str, workdir: str, model_dir: str, language: str) -> None:
+    """子程序入口：辨識，所有回報經 q 傳回主程式。取消＝主程式直接結束本程序（逐段已即時寫入 jsonl，可續跑）。"""
+    import threading
+    import traceback
+    try:
+        rows = transcribe(Path(audio), Path(workdir), lambda m: q.put(("log", m)),
+                          lambda d, t, e: q.put(("prog", (d, t, e))), threading.Event(), model_dir=model_dir,
+                          language=language, stage=lambda n, s: q.put(("stage", (n, s))),
+                          on_text=lambda s: q.put(("text", s)))
+        q.put(("done", len(rows)))
+    except Exception as e:  # 錯誤訊息回傳給主程式顯示
+        q.put(("error", f"{e}\n{traceback.format_exc(limit=3)}"))
+
+
+def run_in_process(audio: Path, workdir: Path, model_dir: str, language: str, cancel, on_event, poll: float = 0.2):
+    """在子程序辨識。on_event(kind, val)：log／prog／stage／text。
+    回傳 ("done", 段數)／("cancelled", None)；子程序出錯丟 RuntimeError。取消時 1～2 秒內結束子程序。"""
+    import multiprocessing as mp
+    import queue as _q
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=worker, args=(q, str(audio), str(workdir), model_dir, language), daemon=True)
+    p.start()
+    try:
+        while True:
+            if cancel.is_set():
+                p.terminate()
+                p.join(5)
+                return "cancelled", None
+            try:
+                kind, val = q.get(timeout=poll)
+            except _q.Empty:
+                if not p.is_alive():
+                    try:                                  # 結束前最後送出的訊息
+                        while True:
+                            kind, val = q.get_nowait()
+                            if kind == "done":
+                                return "done", val
+                            if kind == "error":
+                                raise RuntimeError(val)
+                            on_event(kind, val)
+                    except _q.Empty:
+                        pass
+                    raise RuntimeError(f"辨識程序意外結束（代碼 {p.exitcode}）。已辨識的段落都已存檔，可再按「開始辨識」續跑。")
+                continue
+            if kind == "done":
+                return "done", val
+            if kind == "error":
+                raise RuntimeError(val)
+            on_event(kind, val)
+    finally:
+        if p.is_alive():
+            p.terminate()
+        p.join(5)
 
 
 def clip_wav(workdir: Path, start: float, end: float, out: Path) -> Path:

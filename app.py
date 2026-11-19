@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import threading
+import time
 import tkinter as tk
 import traceback
 import webbrowser
@@ -20,6 +21,7 @@ import pdf
 import report
 import terms
 import learn
+import progress_hand
 from common import KNOWN, add_known, hms, known_pairs, load_known, load_known_entries, merge_known, load_settings, safe_name, save_settings, unique_path
 
 AUDIO_TYPES = [("音檔", "*.m4a *.mp3 *.wav *.mp4 *.aac *.wma *.flac *.ogg *.mov"), ("全部檔案", "*.*")]
@@ -81,15 +83,17 @@ class App:
         af = ttk.Frame(sf)
         af.grid(row=0, column=1, columnspan=2, sticky="ew", padx=6)
         self.v_engine = tk.StringVar(value=self.settings.get("engine", "Claude Code"))
-        cb = ttk.Combobox(af, textvariable=self.v_engine, values=list(engines.ENGINES), state="readonly", width=14)
+        self.cb_engine = cb = ttk.Combobox(af, textvariable=self.v_engine, values=list(engines.ENGINES), state="readonly", width=14)
         cb.pack(side="left")
         cb.bind("<<ComboboxSelected>>", lambda _: self.refresh_engine())
         self.v_engine_st = tk.StringVar()
         self.lb_engine = ttk.Label(af, textvariable=self.v_engine_st, width=16)
         self.lb_engine.pack(side="left", padx=8)
-        ttk.Button(af, text="登入帳號", command=self.login).pack(side="left", padx=2)
+        self.btn_login = ttk.Button(af, text="登入帳號", command=self.login)
+        self.btn_login.pack(side="left", padx=2)
         ttk.Button(af, text="查看用量", command=lambda: webbrowser.open(engines.ENGINES[self.engine]["usage_url"])).pack(side="left", padx=2)
-        ttk.Button(af, text="安裝說明", command=self.install_help).pack(side="left", padx=2)
+        self.btn_install = ttk.Button(af, text="一鍵安裝", command=self.install_or_help)
+        self.btn_install.pack(side="left", padx=2)
 
         ttk.Label(sf, text="語音模型").grid(row=1, column=0, sticky="w", pady=(6, 0))
         mf = ttk.Frame(sf)
@@ -126,10 +130,13 @@ class App:
         self.btn_learn = ttk.Button(b2, text="從我的修改學習", command=self.open_learn)
         self.btn_learn.pack(side="left", padx=(8, 0))
 
-        self.pb = ttk.Progressbar(f, maximum=1000)
-        self.pb.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(10, 2))
         self.v_prog = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.v_prog).grid(row=10, column=0, columnspan=3, sticky="w")
+        ttk.Label(f, textvariable=self.v_prog).grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        # 寫字動畫（取代進度條）：小手寫出剛辨識的句子＋下方細進度條
+        self.hand = progress_hand.HandWriter(f, bg="white")
+        self.hand.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        self.step_t0 = None          # 目前步驟開始時間（AI 撰寫等不知道進度的步驟顯示已經過時間）
+        self.asr_mode = False        # 辨識中：進度文字由辨識階段事件更新
 
         lf = ttk.Frame(f)
         lf.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
@@ -163,8 +170,20 @@ class App:
                     self.logbox.configure(state="disabled")
                 elif kind == "prog":
                     done, total, eta = val
-                    self.pb["value"] = 1000 * done / max(total, 1)
-                    self.v_prog.set(f"已辨識 {hms(done)} / {hms(total)}　預估剩餘 {hms(eta)}")
+                    self.hand.progress(done / max(total, 1))
+                    left = f"　預估剩餘 {hms(eta)}" if eta else ""
+                    self.v_prog.set(f"{asr.STAGES}/{asr.STAGES} 辨識中　已辨識 {hms(done)} / {hms(total)}{left}")
+                elif kind == "stage":                    # 辨識的階段：1 轉檔 2 載模型 3 偵測段落 4 辨識中
+                    n, s = val
+                    self.v_prog.set(f"{n}/{asr.STAGES} {s}" + ("（長錄音要幾分鐘）" if n == 3 else ""))
+                    self.hand.stage("辨識中，等待第一句…" if n == asr.STAGES else f"正在{s}…")
+                elif kind == "text":
+                    self.hand.add_text(val)
+                elif kind == "step":                     # 非辨識的步驟（AI 撰寫、轉 PDF…）
+                    self.step_t0 = time.time()
+                    if not self.asr_mode:
+                        self.hand.stage(f"{val}…")
+                        self.v_prog.set(val)
                 elif kind == "call":
                     try:
                         val()
@@ -174,6 +193,8 @@ class App:
                         self.logbox.configure(state="disabled")
         except queue.Empty:
             pass
+        if self.busy and not self.asr_mode and self.step and self.step_t0:   # 每秒更新已經過時間
+            self.v_prog.set(f"{self.step}　已經過 {hms(time.time() - self.step_t0)}")
         self.root.after(150, self.poll)
 
     def ui(self, fn):
@@ -182,39 +203,60 @@ class App:
     def set_step(self, step: str):
         self.step = step
         self.log(f"▶ {step}…")
+        self.q.put(("step", step))
 
     def set_busy(self, busy: bool):
         self.busy = busy
         if not busy:
             self.step = ""
+            self.step_t0 = None
+            self.asr_mode = False
         st = "disabled" if busy else "normal"
-        for w in (self.btn_run, self.btn_fix, self.btn_rep, self.btn_regen, self.btn_learn):
+        for w in (self.btn_run, self.btn_fix, self.btn_rep, self.btn_regen, self.btn_learn, self.btn_install, self.btn_login):
             w.configure(state=st)
-        self.btn_stop.configure(state="normal" if busy else "disabled")
+        self.cb_engine.configure(state="disabled" if busy else "readonly")   # 工作中不能換 AI
+        self.btn_stop.configure(state="normal" if busy else "disabled", text="取消")
 
-    def run_bg(self, fn, retry=None) -> bool:
-        """一次只跑一個工作。retry：使用上限時「改用另一個 AI 重試」要呼叫的函式。"""
+    def run_bg(self, fn, retry=None, done_text="完成") -> bool:
+        """一次只跑一個工作。retry：使用上限時「改用另一個 AI 重試」要呼叫的函式。
+        fn 丟 engines.Cancelled＝使用者取消（不跳錯誤視窗）。"""
         if self.busy:
             messagebox.showwarning("目前有工作進行中", f"目前有工作進行中{f'（{self.step}）' if self.step else ''}，請等它完成再試。")
             return False
         self.job_id = jid = getattr(self, "job_id", 0) + 1
+        self.cancel.clear()
 
-        def done_busy():
+        def done_busy(outcome):
             if self.job_id == jid:  # 別清掉後來啟動的新工作
                 self.set_busy(False)
+                self.refresh_engine()                 # 安裝中斷／失敗後狀態燈恢復正確
+                if outcome == "ok":
+                    self.hand.done(done_text)
+                    self.v_prog.set(done_text)
+                else:
+                    self.hand.stop()
+                    self.v_prog.set({"cancel": "已取消", "error": "發生錯誤，詳見下方紀錄"}[outcome])
 
         def wrap():
+            engines.set_cancel(self.cancel)       # 本執行緒呼叫 AI 時看這個取消旗標
+            outcome = "error"
             try:
                 fn()
+                outcome = "ok"
+            except engines.Cancelled as e:
+                outcome = "cancel"
+                self.log(str(e) or "已取消")
             except engines.LimitError as e:
-                self.ui(done_busy)
                 self.ui(lambda e=e: self.handle_limit(e, retry))  # except 結束後 e 會被刪掉，要先綁定
+            except engines.InstallError as e:
+                self.log(f"安裝失敗：{e.title}。{e.advice}" + (f"（紀錄：{e.logfile}）" if e.logfile else ""))
+                self.ui(lambda e=e: self.install_error(e))
             except Exception as e:
                 self.log("錯誤：" + str(e))
                 self.log(traceback.format_exc(limit=2))
                 self.ui(lambda msg=str(e): messagebox.showerror("錯誤", msg))
             finally:
-                self.ui(done_busy)
+                self.ui(lambda o=outcome: done_busy(o))
         self.set_busy(True)
         threading.Thread(target=wrap, daemon=True).start()
         return True
@@ -228,36 +270,103 @@ class App:
         return self.v_engine.get()
 
     def refresh_engine(self):
-        p = engines.find(self.engine)
+        if getattr(self, "installing", False):
+            return
+        p = engines.resolve_cli(self.engine, self.log)
         self.v_engine_st.set("● 已安裝" if p else "● 未安裝")
         self.lb_engine.configure(foreground="#2e8b57" if p else "#c0392b")
+        self.btn_install.configure(text="安裝說明" if p else "一鍵安裝")
         self.save_pref()
 
     def login(self):
         try:
-            engines.open_login(self.engine)
+            p = engines.open_login(self.engine, self.log)
+            if p is None:
+                self.log(f"{self.engine} 登入視窗已經開著，請在那個視窗完成登入。")
+                return
             self.log(f"已開啟 {self.engine} 登入視窗，請依畫面在瀏覽器完成登入。")
+            self.btn_login.configure(state="disabled")                 # 防連點
+            self.root.after(5000, lambda: self.btn_login.configure(state="normal"))
         except Exception as e:
             messagebox.showwarning("無法登入", str(e))
 
-    def install_help(self):
+    def install_or_help(self):
+        if engines.resolve_cli(self.engine):
+            self.install_help()
+        else:
+            self.one_click_install()
+
+    def install_help(self, parent=None):
         e = self.engine
-        txt = engines.ENGINES[e]["install"]
-        d = tk.Toplevel(self.root)
-        d.title(f"{e} 安裝說明")
-        d.transient(self.root)
-        ttk.Label(d, text=f"在 PowerShell 執行以下指令安裝 {e}：", padding=8).pack(anchor="w")
-        t = tk.Text(d, height=6, width=70, font=("Consolas", 10))
+        txt = engines.manual_help(e)
+        d = tk.Toplevel(parent or self.root)
+        d.title(f"{e} 手動安裝說明")
+        d.transient(parent or self.root)
+        t = tk.Text(d, height=10, width=74, font=(FONT, 10), wrap="word")
         t.insert("1.0", txt)
-        t.pack(padx=8)
+        t.configure(state="disabled")
+        t.pack(padx=8, pady=8)
+
         def copy():
             d.clipboard_clear()
-            d.clipboard_append(txt.splitlines()[0])
+            d.clipboard_append(engines.INSTALLERS[e]["script"])
             self.log("已複製安裝指令。")
         bf = ttk.Frame(d, padding=8)
         bf.pack(fill="x")
-        ttk.Button(bf, text="複製第一行指令", command=copy).pack(side="left")
+        ttk.Button(bf, text="複製安裝指令", command=copy).pack(side="left")
         ttk.Button(bf, text="安裝好了，重新偵測", command=lambda: (self.refresh_engine(), d.destroy())).pack(side="right")
+
+    def one_click_install(self):
+        e = self.engine
+        if self.busy:
+            self.run_bg(None)  # 顯示「目前有工作進行中」
+            return
+        if not messagebox.askokcancel(
+                f"安裝 {e}",
+                f"將從 {e} 官方網站下載並安裝，約需幾分鐘。\n\n"
+                "・不需要系統管理員權限\n・安裝過程不會跳出其他視窗，進度顯示在下方紀錄\n"
+                "・裝好後會問你要不要登入帳號\n\n要開始安裝嗎？"):
+            return
+
+        def job():
+            self.installing = True
+            self.set_step(f"安裝 {e} 中")
+            try:
+                engines.install(e, self.log, self.cancel)
+            finally:
+                self.installing = False
+            self.ui(lambda: self.after_install(e))
+        self.v_engine_st.set("● 安裝中…")
+        self.lb_engine.configure(foreground="#d68910")
+        self.run_bg(job, done_text=f"{e} 安裝完成")
+
+    def after_install(self, e):
+        self.refresh_engine()
+        if messagebox.askyesno("安裝完成", f"{e} 已安裝完成。\n要現在登入帳號嗎？\n（會開一個視窗，依畫面在瀏覽器登入）"):
+            self.login()
+
+    def install_error(self, err: "engines.InstallError"):
+        self.refresh_engine()
+        d = tk.Toplevel(self.root)
+        d.title(f"{self.engine} 安裝沒有完成")
+        d.transient(self.root)
+        ttk.Label(d, text=err.title, font=(FONT, 12, "bold"), foreground="#c0392b", padding=(10, 10, 10, 2)).pack(anchor="w")
+        ttk.Label(d, text=err.advice, wraplength=520, padding=(10, 2)).pack(anchor="w")
+        if err.logfile:
+            ttk.Label(d, text=f"完整安裝紀錄：{err.logfile}", foreground="#666", wraplength=520, padding=(10, 6)).pack(anchor="w")
+        report_txt = (f"{self.engine} 安裝失敗：{err.title}\n{err.advice}\n記錄檔：{err.logfile}\n\n"
+                      + "\n".join((err.output or "").splitlines()[-60:]))
+
+        def copy():
+            d.clipboard_clear()
+            d.clipboard_append(report_txt)
+            self.log("已複製錯誤訊息。")
+        bf = ttk.Frame(d, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="複製錯誤訊息", command=copy).pack(side="left")
+        ttk.Button(bf, text="手動安裝說明", command=lambda: self.install_help(d)).pack(side="left", padx=6)
+        ttk.Button(bf, text="開啟紀錄資料夾", command=lambda: os.startfile(str(engines.log_dir()))).pack(side="left")
+        ttk.Button(bf, text="關閉", command=d.destroy).pack(side="right")
 
     def handle_limit(self, e: engines.LimitError, retry):
         self.limit = (e.engine, e.reset, e.message)
@@ -443,7 +552,8 @@ class App:
 
     def stop(self):
         self.cancel.set()
-        self.log("取消中…（等目前這一段辨識完就停止）")
+        self.btn_stop.configure(text="停止中…", state="disabled")
+        self.log("取消中…")
 
     def on_close(self):
         doing = f"目前步驟：{self.step}\n" if getattr(self, "step", "") else ""
@@ -473,13 +583,18 @@ class App:
         self.save_state(wd, audio=str(audio), model=mp, language=lang)
 
         def job():
+            self.asr_mode = True
             self.set_step("語音辨識中")
-            rows = asr.transcribe(audio, wd, self.log, lambda d, t, e: self.q.put(("prog", (d, t, e))), self.cancel,
-                                  model_dir=mp, language=lang)
-            if not self.cancel.is_set() and rows:
+            # 辨識在子程序跑：按「取消」直接結束子程序（1～2 秒），已辨識段落已逐段存檔，下次續跑
+            status, n = asr.run_in_process(audio, wd, mp, lang, self.cancel, lambda k, v: self.q.put((k, v)))
+            if status == "cancelled":
+                rows = asr.read_rows(wd / "逐字稿_原始.jsonl")
+                upto = hms(rows[-1]["end"]) if rows else "00:00:00"
+                raise engines.Cancelled(f"已取消辨識，已辨識到 {upto}（{len(rows)} 段已存檔）；下次按「① 開始辨識」會從這裡續跑")
+            if n:
                 self.log("辨識完成，開啟校正畫面…")
                 self.ui(lambda: self.open_fix(c))
-        self.run_bg(job)
+        self.run_bg(job, done_text="辨識完成")
 
     def open_fix(self, c: SimpleNamespace = None):
         if c is None:
@@ -507,7 +622,7 @@ class App:
             return
         engine = self.engine
         if not engines.find(engine):
-            messagebox.showerror(f"找不到 {engine}", f"這台電腦找不到 {engine}，請按「安裝說明」，或改選另一個 AI。")
+            messagebox.showerror(f"找不到 {engine}", f"這台電腦找不到 {engine}，請按「一鍵安裝」，或改選另一個 AI。")
             return
         name, topic = c.name, self.v_topic.get().strip()
         audio_name = Path(st.get("audio", "")).name
@@ -1082,7 +1197,11 @@ def selftest(audio: str, out: str, engine: str = "Claude Code") -> None:
         if not models:
             raise RuntimeError(f"沒有語音模型，請先開啟程式下載（存放位置 {asr.user_models_dir()}）")
         mp = next((p for n, p in models if n.startswith("large-v3-turbo")), models[0][1])
-        rows = asr.transcribe(Path(audio), outd / "_工作檔" / "環境檢測", log, lambda *a: None, threading.Event(), model_dir=mp)
+        wd = outd / "_工作檔" / "環境檢測"
+        # 與主畫面相同：在子程序辨識（順便檢查打包版的子程序能否啟動）
+        st, _n = asr.run_in_process(Path(audio), wd, mp, "中文（繁體輸出）", threading.Event(),
+                                    lambda k, v: log(v if k == "log" else f"階段 {v[0]}/{asr.STAGES} {v[1]}") if k in ("log", "stage") else None)
+        rows = asr.read_rows(wd / "逐字稿_原始.jsonl")
         log(f"辨識 OK：{len(rows)} 段；第一段：{rows[0]['text'] if rows else '（無）'}")
         for eng in engines.ENGINES:
             p = engines.find(eng)
@@ -1099,6 +1218,8 @@ def selftest(audio: str, out: str, engine: str = "Claude Code") -> None:
 
 def main():
     import sys
+    import multiprocessing
+    multiprocessing.freeze_support()   # 打包版：語音辨識子程序從這裡分流，不能開主視窗
     if len(sys.argv) >= 4 and sys.argv[1] == "--檢測":
         selftest(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "全部")
         return
