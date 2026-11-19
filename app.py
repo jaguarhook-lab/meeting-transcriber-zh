@@ -22,7 +22,7 @@ import report
 import terms
 import learn
 import progress_hand
-from common import KNOWN, add_known, hms, known_pairs, load_known, load_known_entries, merge_known, load_settings, safe_name, save_settings, unique_path
+from common import VERSION, KNOWN, add_known, hms, known_pairs, load_known, load_known_entries, merge_known, load_settings, safe_name, save_settings, unique_path
 
 AUDIO_TYPES = [("音檔", "*.m4a *.mp3 *.wav *.mp4 *.aac *.wma *.flac *.ogg *.mov"), ("全部檔案", "*.*")]
 FONT = "Microsoft JhengHei"
@@ -39,7 +39,7 @@ def fmt_left(reset: dt.datetime) -> str:
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("錄音轉文字")
+        root.title(f"錄音轉文字 v{VERSION}")
         root.geometry("900x720")
         root.minsize(780, 600)
         self.q = queue.Queue()
@@ -141,12 +141,14 @@ class App:
         lf = ttk.Frame(f)
         lf.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
         f.rowconfigure(11, weight=1)
+        ttk.Label(f, text=f"版本 v{VERSION}", foreground="#888", font=(FONT, 8)).grid(row=12, column=2, sticky="e", pady=(2, 0))
         self.logbox = tk.Text(lf, height=10, wrap="word", font=(FONT, 9), state="disabled")
         sb = ttk.Scrollbar(lf, command=self.logbox.yview)
         self.logbox.configure(yscrollcommand=sb.set)
         self.logbox.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
+        self.log(f"錄音轉文字 v{VERSION} 已啟動")
         self.refresh_engine()
         self.refresh_models()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1192,6 +1194,7 @@ def selftest(audio: str, out: str, engine: str = "Claude Code") -> None:
         logp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
         models = asr.list_models()
+        log(f"錄音轉文字 v{VERSION}")
         log(f"程式位置：{Path(sys.executable).parent}")
         log(f"找到的模型：{models or '無'}")
         if not models:
