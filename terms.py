@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 import engines
+import prompts
 from common import GLOSSARY, GLOSSARY_EXAMPLE, context_full, context_text, hms, known_pairs, known_prompt, load_known
 
 
@@ -68,32 +69,24 @@ def occurrences(rows: list, word: str, limit: int = 3) -> tuple[int, list]:
     return n, ex
 
 
-TERMS_PROMPT = """以下是{情境}的語音辨識逐字稿，繁體中文，每行開頭是時間點。
-語音辨識常把人名、公司名、產品或設備名、專有名詞辨識成音近的錯字。請找出「疑似誤辨識」且對理解會議重要的詞。
-
-規則：
-- 只列逐字稿中實際出現的原詞（原詞必須能在逐字稿中原樣找到）。
-- 同一個人名或名稱的不同錯誤寫法，各列一項，建議寫法要一致。
-- 不確定正確寫法時，「建議」填空字串，不要臆測。
-- 最多 60 項，依重要性排序。
-- 只輸出 JSON 陣列，不要任何說明文字或程式碼框。格式：
-[{"原詞": "...", "建議": "...", "類別": "人名|公司|產品或設備|專有名詞|其他", "理由": "一句話"}]
-
-逐字稿：
-"""
+# 範本「找疑問詞」改由 prompts.py 管理（原廠預設 → 我的預設 → 本次送出）
 
 
-def find_suspects(rows: list, log, engine: str = "Claude Code") -> list:
-    """只保留逐字稿裡真的有的詞。"""
-    log(f"請 {engine} 找疑似誤辨識的專有名詞（約需數分鐘）…")
+def terms_prompt(override: str | None = None, materials: str = "") -> str:
+    """組好的找疑問詞提示（不含逐字稿本文）。"""
     known = load_known()
     note = ("以下是寫法已確認正確的已知名詞（括號內為說明），不要列出；但逐字稿中它們的音近錯字仍要列，"
             "建議寫法用這裡的寫法：\n" + known_prompt() + "\n\n") if known else ""
     bg = context_full()
     if "\n" in bg:
         note = "背景資料：\n" + bg + "\n\n" + note
-    out = engines.run(engine, TERMS_PROMPT.replace("{情境}", context_text()).replace("逐字稿：\n", note + "逐字稿：\n")
-                         + to_text(rows))
+    return prompts.build("找疑問詞", {"情境一句話": context_text(), "背景資料": note, "會議資料": materials}, override)
+
+
+def find_suspects(rows: list, log, engine: str = "Claude Code", prompt: str | None = None) -> list:
+    """只保留逐字稿裡真的有的詞。"""
+    log(f"請 {engine} 找疑似誤辨識的專有名詞（約需數分鐘）…")
+    out = engines.run(engine, (prompt if prompt is not None else terms_prompt()) + to_text(rows))
     m = re.search(r"\[.*\]", out, re.S)
     if not m:
         raise RuntimeError(f"{engine} 回傳的內容不是 JSON：{out[:200]}")

@@ -13,7 +13,6 @@ import time
 import wave
 from pathlib import Path
 
-import numpy as np
 
 from common import base_dir, context_text, hms
 
@@ -113,7 +112,8 @@ def download_model(name: str, progress, cancel, log) -> Path:
     return dest
 
 
-def ensure_wav(audio: Path, wav: Path, log) -> np.ndarray:
+def ensure_wav(audio: Path, wav: Path, log):
+    import numpy as np   # 用到才載入：主程式啟動不載入編譯元件（被 Windows 應用程式控制擋時仍能開）
     if wav.exists():
         with wave.open(str(wav), "rb") as w:
             data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
@@ -241,7 +241,7 @@ def worker(q, audio: str, workdir: str, model_dir: str, language: str) -> None:
                           on_text=lambda s: q.put(("text", s)))
         q.put(("done", len(rows)))
     except Exception as e:  # 錯誤訊息回傳給主程式顯示
-        q.put(("error", f"{e}\n{traceback.format_exc(limit=3)}"))
+        q.put(("error", f"{e}\n{traceback.format_exc()}"))   # 完整追蹤：才判斷得出是哪個元件被擋
 
 
 def run_in_process(audio: Path, workdir: Path, model_dir: str, language: str, cancel, on_event, poll: float = 0.2):

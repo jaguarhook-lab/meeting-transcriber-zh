@@ -2,7 +2,9 @@
 
 本程式的程式碼採 MIT 授權（見 `LICENSE`）。
 
-GitHub Releases 上的 Windows 打包版（`meeting-transcriber-zh-vX.Y.Z-win64.zip`）包含下列第三方元件，各自依其授權使用，原始授權檔在 `_internal\` 下各個 `*.dist-info` 資料夾裡。從原始碼執行或用 `build.py` 打包時也會用到這些元件；自行打包後散布給別人的話，請遵守它們的授權，特別是下面的 AGPL 與 LGPL 說明。
+GitHub Releases 上的 Windows 打包版（`meeting-transcriber-zh-vX.Y.Z-win64.zip`）包含下列第三方元件，各自依其授權使用，原始授權檔在 `_internal\` 下各個 `*.dist-info` 資料夾裡。從原始碼執行或用 `build.py` 打包時也會用到這些元件；自行打包後散布給別人的話，請遵守它們的授權，特別是下面的 LGPL 說明。
+
+v1.2.0 起不再包含 PyMuPDF（AGPL-3.0）：會議記錄轉 PDF 改用 Windows 內建的 Microsoft Edge 列印，Edge 不隨本程式散布。
 
 語音模型（OpenAI Whisper，MIT 授權）沒有包含在內，使用者自行從 Hugging Face 下載。
 
@@ -20,8 +22,8 @@ GitHub Releases 上的 Windows 打包版（`meeting-transcriber-zh-vX.Y.Z-win64.
 | huggingface_hub、hf_xet | Apache-2.0 | https://github.com/huggingface/huggingface_hub |
 | NumPy（含 OpenBLAS 等） | BSD-3-Clause | https://numpy.org |
 | opencc-python-reimplemented | Apache-2.0 | https://github.com/yichen0831/opencc-python |
-| PyMuPDF（含 MuPDF） | AGPL-3.0（或 Artifex 商業授權） | https://github.com/pymupdf/PyMuPDF |
 | Python-Markdown | BSD-3-Clause | https://github.com/Python-Markdown/markdown |
+| pypdf（讀會議資料 PDF 的文字） | BSD-3-Clause | https://github.com/py-pdf/pypdf |
 | requests | Apache-2.0 | https://github.com/psf/requests |
 | urllib3 | MIT | https://github.com/urllib3/urllib3 |
 | certifi | MPL-2.0 | https://github.com/certifi/python-certifi |
@@ -40,15 +42,10 @@ GitHub Releases 上的 Windows 打包版（`meeting-transcriber-zh-vX.Y.Z-win64.
 | pywin32 | PSF License | https://github.com/mhammond/pywin32 |
 | PyInstaller bootloader | GPL-2.0-or-later（含允許散布非 GPL 程式的例外條款） | https://pyinstaller.org |
 
-## AGPL（PyMuPDF）
+## 舊版（v1.1.x 以前）與 AGPL
 
-會議記錄轉 PDF 用的是 PyMuPDF，PyMuPDF 和 MuPDF 都採 AGPL-3.0 授權。因為打包版包含 PyMuPDF，整個作品的對應原始碼如下：
-
-- 本專案：https://github.com/jaguarhook-lab/meeting-transcriber-zh ，和打包版同名的標籤（例如 `v1.1.2`）就是那一版的完整原始碼。
-- PyMuPDF 1.27.2.2（MuPDF 1.27.2）：https://github.com/pymupdf/PyMuPDF/releases/tag/1.27.2.2 ，MuPDF 原始碼在 https://mupdf.com/releases
-- 建置方式：Python 3.14 和 PyInstaller 6.22.3，執行 `build.py`，套件版本見 `requirements.txt`。
-
-自行打包散布時，也請用同樣的方式提供對應原始碼。
+v1.1.x 以前的打包版含 PyMuPDF 1.27.2.2（MuPDF 1.27.2，AGPL-3.0）。那些版本的對應原始碼：本專案同名標籤（例如 `v1.1.2`）、
+https://github.com/pymupdf/PyMuPDF/releases/tag/1.27.2.2 、https://mupdf.com/releases ；建置方式為 Python 3.14 與 PyInstaller 6.22.3 執行 `build.py`。
 
 ## LGPL（FFmpeg、chardet）
 

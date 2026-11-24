@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Markdown 轉 PDF（python-markdown + PyMuPDF）。"""
+"""Markdown 轉 PDF（python-markdown 轉 HTML，再用 Windows 內建 Edge 列印成 PDF）。"""
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
-import fitz  # PyMuPDF
 import markdown
 
 # (一般, 粗體)，沒有粗體就用一般
@@ -16,10 +17,12 @@ FONT_CANDIDATES = [
 ]
 
 CSS = """
-@font-face { font-family: zh; src: url(%(reg)s); }
-@font-face { font-family: zh; src: url(%(bold)s); font-weight: bold; }
-* { font-family: zh; }
-body { font-size: 10.5pt; line-height: 1.5; color: #111; }
+@page { size: A4; margin: 16mm 14mm; }
+* { font-family: "%(face)s", "Microsoft JhengHei", "PMingLiU", sans-serif;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { font-size: 10.5pt; line-height: 1.5; color: #111; margin: 0; }
+tr, blockquote { page-break-inside: avoid; }
+h1, h2, h3 { page-break-after: avoid; }
 h1 { font-size: 17pt; border-bottom: 2px solid #333; padding-bottom: 3px; }
 h2 { font-size: 13.5pt; margin-top: 14pt; border-bottom: 1px solid #999; }
 h3 { font-size: 11.5pt; margin-top: 10pt; }
@@ -30,8 +33,6 @@ blockquote { border-left: 3px solid #aaa; margin: 6px 0; padding: 2px 10px; colo
 code { font-size: 9.5pt; }
 """
 
-PAGE = fitz.paper_rect("a4")
-MARGIN = (40, 45, -40, -45)  # 左、上、右、下（點）≈ 14mm／16mm
 
 
 def find_fonts() -> tuple[Path, str, str]:
@@ -69,30 +70,62 @@ def ensure_breaks(text: str) -> str:
     return "\n".join(out)
 
 
-def md_to_pdf(src: Path, dst: Path) -> Path:
-    fonts, reg, bold = find_fonts()
+EDGE_CANDIDATES = (r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+                   r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+                   r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe")
+
+
+def find_edge() -> str:
+    """Windows 內建 Edge（微軟簽章，不會被應用程式控制擋）。"""
+    for c in EDGE_CANDIDATES:
+        p = Path(os.path.expandvars(c))
+        if p.exists():
+            return str(p)
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe") as k:
+            p = winreg.QueryValueEx(k, "")[0]
+            if Path(p).exists():
+                return p
+    except OSError:
+        pass
+    p = shutil.which("msedge")
+    if p:
+        return p
+    raise RuntimeError("找不到 Microsoft Edge，無法轉 PDF。會議記錄 md 已存好，可用 Word 開啟 md 後另存 PDF，或請 IT 安裝 Edge。")
+
+
+def md_to_html(src: Path) -> str:
+    fonts, reg, bold = find_fonts()                      # 確認有中文字型（沒有就直接說明）
     # python-markdown 巢狀清單要 4 格縮排：把行首每 2 格放大成 4 格
     text = "\n".join(" " * (2 * (len(l) - len(l.lstrip(" ")))) + l.lstrip(" ")
                      for l in ensure_breaks(strip_timestamps(Path(src).read_text(encoding="utf-8"))).splitlines())
     body = markdown.markdown(text, extensions=["tables", "sane_lists"]).replace("[ ]", "☐").replace("[x]", "☑")
-    story = fitz.Story(html=f"<body>{body}</body>", user_css=CSS % {"reg": reg, "bold": bold},
-                       archive=fitz.Archive(str(fonts)))
+    face = {"msjh.ttc": "Microsoft JhengHei", "mingliu.ttc": "PMingLiU", "msyh.ttc": "Microsoft YaHei"}[reg]
+    return (f"<!doctype html><html lang='zh-Hant'><head><meta charset='utf-8'><style>{CSS % {'face': face}}</style>"
+            f"</head><body>{body}</body></html>")
+
+
+def md_to_pdf(src: Path, dst: Path, timeout: int = 120) -> Path:
+    """md → HTML → Edge 無頭模式列印成 PDF（2026-11-24 起；原用 PyMuPDF，會被 Windows 應用程式控制擋）。
+    用獨立暫存的 Edge 使用者資料夾，不影響使用者開著的 Edge。"""
+    edge = find_edge()
     dst = Path(dst)
-    # 先寫到暫存再做字型子集化，不然整套字型會讓檔案大到約 35 MB
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
-        raw = Path(td) / "raw.pdf"
-        w = fitz.DocumentWriter(str(raw))
-        more = 1
-        while more:
-            dev = w.begin_page(PAGE)
-            more, _ = story.place(PAGE + MARGIN)
-            story.draw(dev)
-            w.end_page()
-        w.close()
-        doc = fitz.open(raw)
-        doc.subset_fonts()
-        doc.ez_save(str(dst))
-        doc.close()
+        html = Path(td) / "doc.html"
+        html.write_text(md_to_html(src), encoding="utf-8")
+        out = Path(td) / "out.pdf"
+        args = [edge, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                "--disable-extensions", "--disable-sync", f"--user-data-dir={Path(td) / 'edge'}",
+                "--no-pdf-header-footer", "--print-to-pdf-no-header", f"--print-to-pdf={out}", html.as_uri()]
+        try:
+            subprocess.run(args, capture_output=True, timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Edge 轉 PDF 超過 {timeout} 秒沒有完成。會議記錄 md 已存好，可稍後按「重新產生 PDF」再試。")
+        if not out.exists() or out.stat().st_size == 0:
+            raise RuntimeError("Edge 沒有產生 PDF。會議記錄 md 已存好，可稍後按「重新產生 PDF」再試。")
+        shutil.copyfile(out, dst)
     if not dst.exists() or dst.stat().st_size == 0:
         raise RuntimeError(f"PDF 沒有產生：{dst}")
     return dst

@@ -15,14 +15,25 @@ from pathlib import Path
 from types import SimpleNamespace
 from tkinter import filedialog, messagebox, ttk
 
-import engines
-import asr
-import pdf
-import report
-import terms
-import learn
-import progress_hand
-from common import VERSION, KNOWN, add_known, hms, known_pairs, load_known, load_known_entries, merge_known, load_settings, safe_name, save_settings, unique_path
+# 程式自己的模組：載入失敗（例如被 Windows 應用程式控制擋）時不讓整個程式當掉，由 main() 顯示中文說明
+_IMPORT_ERROR = None
+try:
+    from common import VERSION                          # 先載入：啟動錯誤視窗也要顯示版本
+except Exception:
+    VERSION = "?"
+try:
+    import engines
+    import asr
+    import pdf
+    import report
+    import terms
+    import learn
+    import progress_hand
+    import blocked
+    import prompts
+    from common import VERSION, KNOWN, add_known, hms, known_pairs, load_known, load_known_entries, merge_known, load_settings, safe_name, save_settings, unique_path
+except Exception:
+    _IMPORT_ERROR = traceback.format_exc()
 
 AUDIO_TYPES = [("音檔", "*.m4a *.mp3 *.wav *.mp4 *.aac *.wma *.flac *.ogg *.mov"), ("全部檔案", "*.*")]
 FONT = "Microsoft JhengHei"
@@ -119,7 +130,8 @@ class App:
         self.btn_stop = ttk.Button(b, text="取消", command=self.stop, state="disabled")
         self.btn_fix = ttk.Button(b, text="② 校正專有名詞", style="Big.TButton", command=self.open_fix)
         self.btn_rep = ttk.Button(b, text="③ 產生會議記錄", style="Big.TButton", command=self.start_report)
-        for w in (self.btn_run, self.btn_stop, self.btn_fix, self.btn_rep):
+        self.btn_edit = ttk.Button(b, text="④ 修改會議記錄", style="Big.TButton", command=self.open_editor)
+        for w in (self.btn_run, self.btn_stop, self.btn_fix, self.btn_rep, self.btn_edit):
             w.pack(side="left", padx=(0, 8))
         b2 = ttk.Frame(f)
         b2.grid(row=8, column=0, columnspan=3, sticky="ew")
@@ -129,6 +141,14 @@ class App:
         ttk.Button(b2, text="編輯已知名詞", command=self.edit_known).pack(side="left", padx=(8, 0))
         self.btn_learn = ttk.Button(b2, text="從我的修改學習", command=self.open_learn)
         self.btn_learn.pack(side="left", padx=(8, 0))
+        self.btn_check = ttk.Button(b2, text="環境檢查", command=self.env_check)
+        self.btn_check.pack(side="left", padx=(8, 0))
+        ttk.Button(b2, text="AI 記憶與提示詞", command=self.open_memory).pack(side="left", padx=(8, 0))
+        ttk.Button(b2, text="會議資料…", command=self.open_materials).pack(side="left", padx=(8, 0))
+        self.v_preview = tk.BooleanVar(value=bool(self.settings.get("preview_prompt", False)))
+        ttk.Checkbutton(b2, text="送出前讓我看 AI 提示", variable=self.v_preview,
+                        command=lambda: (self.settings.update(preview_prompt=self.v_preview.get()), save_settings(self.settings))
+                        ).pack(side="left", padx=(12, 0))
 
         self.v_prog = tk.StringVar(value="")
         ttk.Label(f, textvariable=self.v_prog).grid(row=9, column=0, columnspan=3, sticky="w", pady=(10, 0))
@@ -214,7 +234,7 @@ class App:
             self.step_t0 = None
             self.asr_mode = False
         st = "disabled" if busy else "normal"
-        for w in (self.btn_run, self.btn_fix, self.btn_rep, self.btn_regen, self.btn_learn, self.btn_install, self.btn_login):
+        for w in (self.btn_run, self.btn_fix, self.btn_rep, self.btn_edit, self.btn_regen, self.btn_learn, self.btn_install, self.btn_login):
             w.configure(state=st)
         self.cb_engine.configure(state="disabled" if busy else "readonly")   # 工作中不能換 AI
         self.btn_stop.configure(state="normal" if busy else "disabled", text="取消")
@@ -256,7 +276,8 @@ class App:
             except Exception as e:
                 self.log("錯誤：" + str(e))
                 self.log(traceback.format_exc(limit=2))
-                self.ui(lambda msg=str(e): messagebox.showerror("錯誤", msg))
+                full = f"{e}\n\n{traceback.format_exc()}"
+                self.ui(lambda full=full, where=self.step: self.show_error(full, where))
             finally:
                 self.ui(lambda o=outcome: done_busy(o))
         self.set_busy(True)
@@ -346,6 +367,154 @@ class App:
         self.refresh_engine()
         if messagebox.askyesno("安裝完成", f"{e} 已安裝完成。\n要現在登入帳號嗎？\n（會開一個視窗，依畫面在瀏覽器登入）"):
             self.login()
+
+    def preview_prompt(self, name, filled, rebuild, extra_len, parent=None):
+        """送出前檢視；回傳要送出的提示，取消回 None。"""
+        import memory_ui
+        d = memory_ui.PreviewDialog(parent or self.root, name, filled, rebuild, extra_len)
+        if d.result is None:
+            self.log(f"已取消送出（{name}）。")
+        return d.result
+
+    def keep_prompt(self, workdir: Path, name: str, prompt: str, engine: str, extra_len: int):
+        """留存實際送出的提示（不含逐字稿本文），方便回查記錄是用什麼指示寫的。"""
+        try:
+            workdir.mkdir(parents=True, exist_ok=True)
+            src = prompts.load(name)[1]
+            p = workdir / f"送出的提示_{name}_{dt.datetime.now():%Y%m%d_%H%M%S}.md"
+            p.write_text(f"<!-- {dt.datetime.now():%Y-%m-%d %H:%M:%S}｜{engine}｜範本：{src}｜之後接逐字稿 {extra_len:,} 字 -->\n\n{prompt}",
+                         encoding="utf-8")
+        except OSError as e:
+            self.log(f"送出的提示沒有留存成功：{e}")
+
+    def open_materials(self):
+        """會議資料（議程、簡報、文件）：記在這場會議的工作檔。"""
+        if not self.check_paths(need_audio=False):
+            return
+        import materials_ui
+        materials_ui.MaterialsWindow(self, self.ctx())
+
+    def materials_block(self, c) -> str:
+        """這場會議要送給 AI 的會議資料段落（沒有就空字串），並寫一行紀錄。"""
+        import materials_ui
+        try:
+            mb, n, chars = materials_ui.block(self, c)
+        except Exception as e:
+            self.log(f"會議資料讀取失敗，這次不附：{e}")
+            return ""
+        if n:
+            self.log(f"附上會議資料 {n} 份，共 {chars:,} 字。")
+        return mb
+
+    def memory_propose(self, c, md: Path, pending_note: str = ""):
+        """請 AI 依「AI 原稿 → 使用者定稿」的修改提議記憶更新；結果由使用者逐條核可。"""
+        import memory
+        import memory_ui
+        o = self.state(c.workdir).get("minutes_orig")
+        if not o or not Path(o).exists():
+            self.log("這場會議沒有保存 AI 原稿，無法比對修改、提議記憶。")
+            return
+        orig, edited = Path(o).read_text(encoding="utf-8"), Path(md).read_text(encoding="utf-8")
+        if orig.strip() == edited.strip():
+            messagebox.showinfo("沒有修改", "會議記錄和 AI 原稿相同，沒有可以學的修改。")
+            return
+        engine = self.engine
+        if not engines.find(engine):
+            messagebox.showerror(f"找不到 {engine}", f"這台電腦找不到 {engine}，請按「一鍵安裝」，或改選另一個 AI。")
+            return
+
+        def job():
+            self.set_step(f"{engine} 分析你的修改，提議要記住的事")
+            prop = memory.propose(engine, orig, edited, pending_note)
+            self.log(f"{engine} 提議：記憶 {len(prop['memory'])} 條、範本修改 {len(prop['template'])} 處（由你決定要不要採用）")
+            self.ui(lambda: memory_ui.ProposalWindow(self, prop, c.name))
+        self.run_bg(job, done_text="提議完成")
+
+    def memory_consolidate(self, mw=None):
+        """記憶太長時請 AI 整理；並排比較後按「採用」才取代（原本的備份）。"""
+        import memory
+        import memory_ui
+        if memory.items_count() == 0:
+            messagebox.showinfo("沒有記憶", "長期記憶目前是空的，不需要整理。")
+            return
+        if mw is not None and mw.t_mem.edit_modified():
+            messagebox.showwarning("尚未存檔", "長期記憶分頁有修改還沒存，請先存檔再整理。")
+            return
+        old, engine = memory.load_text(), self.engine
+
+        def job():
+            self.set_step(f"{engine} 整理長期記憶中")
+            new = memory.consolidate(engine)
+
+            def show():
+                def accept():
+                    memory.save_text(new, f"整理記憶（{engine}）")
+                    self.log("已採用整理後的長期記憶（原本的在 記憶備份\\）")
+                    if mw is not None and mw.win.winfo_exists():
+                        mw.reload_mem()
+                memory_ui.compare_window(self.root, f"整理記憶：原本 {memory.items_count(old)} 條、{len(memory.prompt_text(old)):,} 字 → "
+                                                    f"整理後 {memory.items_count(new)} 條、{len(memory.prompt_text(new)):,} 字",
+                                         old, new, "原本", "AI 整理後", accept=accept, accept_text="採用整理後的版本")
+            self.ui(show)
+        self.run_bg(job, done_text="整理完成")
+
+    def open_memory(self):
+        w = getattr(self, "_memwin", None)
+        if w is not None and w.win.winfo_exists():
+            w.win.deiconify()
+            w.win.lift()
+            return
+        import memory_ui
+        self._memwin = memory_ui.MemoryWindow(self)
+
+    def env_check(self):
+        """檢查語音辨識元件能否載入（是否被 Windows 擋）、Edge、字型、模型、AI 工具。"""
+        def job():
+            self.set_step("環境檢查中")
+            rep, ok = blocked.environment_report(engines, asr, pdf)
+            for line in rep.splitlines():
+                self.log(line)
+            blocked.write_log("環境檢查", f"錄音轉文字 v{VERSION}\n{rep}")
+            self.ui(lambda: self.show_report("環境檢查：" + ("全部正常" if ok else "有項目需要處理"), rep))
+        self.run_bg(job, done_text="環境檢查完成")
+
+    def show_report(self, title: str, text: str):
+        d = tk.Toplevel(self.root)
+        d.title(title)
+        d.transient(self.root)
+        t = tk.Text(d, height=20, width=96, font=(FONT, 9), wrap="word")
+        t.insert("1.0", text)
+        t.configure(state="disabled")
+        t.pack(fill="both", expand=True, padx=10, pady=10)
+        bf = ttk.Frame(d, padding=(10, 0, 10, 10))
+        bf.pack(fill="x")
+        ttk.Button(bf, text="複製", command=lambda: (d.clipboard_clear(), d.clipboard_append(f"錄音轉文字 v{VERSION}\n{text}"))).pack(side="left")
+        ttk.Button(bf, text="關閉", command=d.destroy).pack(side="right")
+
+    def show_error(self, text: str, where: str = "", parent=None):
+        """錯誤視窗：被 Windows 擋住元件時給中文說明與處理方式；完整訊息可複製，並存 log。"""
+        title, body = blocked.explain(text, where)
+        logp = blocked.write_log("錯誤", f"{where}\n{text}")
+        d = tk.Toplevel(parent or self.root)
+        d.title(title)
+        d.transient(parent or self.root)
+        ttk.Label(d, text=title, font=(FONT, 12, "bold"), foreground="#c0392b", padding=(12, 10, 12, 2)).pack(anchor="w")
+        ttk.Label(d, text=body, wraplength=560, justify="left", padding=(12, 2)).pack(anchor="w")
+        det = tk.Text(d, height=7, width=80, font=("Consolas", 8), wrap="word", bg="#f7f7f7")
+        det.insert("1.0", text.strip())
+        det.configure(state="disabled")
+        det.pack(fill="both", expand=True, padx=12, pady=6)
+        ttk.Label(d, text=f"完整紀錄：{logp}", foreground="#666", padding=(12, 0)).pack(anchor="w")
+
+        def copy():
+            d.clipboard_clear()
+            d.clipboard_append(f"{title}\n{body}\n\n{text.strip()}")
+            self.log("已複製錯誤訊息。")
+        bf = ttk.Frame(d, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="複製錯誤訊息", command=copy).pack(side="left")
+        ttk.Button(bf, text="開啟紀錄資料夾", command=lambda: os.startfile(str(blocked.log_dir()))).pack(side="left", padx=6)
+        ttk.Button(bf, text="關閉", command=d.destroy).pack(side="right")
 
     def install_error(self, err: "engines.InstallError"):
         self.refresh_engine()
@@ -639,6 +808,23 @@ class App:
             redo = True
         elif have_min:
             redo = messagebox.askyesno("已有會議記錄", f"會議記錄已產生過，專題還沒有。\n\n「是」：會議記錄也重新產生一份新版\n「否」：只補產生專題")
+        # 送出前檢視（本次送出層）：在畫面執行緒先組好提示讓使用者看／改；取消就不送
+        need_min = redo or not have_min
+        need_top = bool(topic) and (redo or not have_top)
+        p_min = p_top = None
+        mb = self.materials_block(c)                   # 會議資料（沒有就空字串）
+        if self.v_preview.get():
+            n_text = len(tp.read_text(encoding="utf-8"))
+            if need_min:
+                p_min = self.preview_prompt("會議記錄", report.minutes_prompt(name, audio_name, tp.name, pending, topic, engine, confirmed, materials=mb),
+                                            lambda t: report.minutes_prompt(name, audio_name, tp.name, pending, topic, engine, confirmed, t, materials=mb), n_text)
+                if p_min is None:
+                    return
+            if need_top:
+                p_top = self.preview_prompt("專題整理", report.topic_prompt(name, topic, pending, engine, confirmed, materials=mb),
+                                            lambda t: report.topic_prompt(name, topic, pending, engine, confirmed, t, materials=mb), n_text)
+                if p_top is None:
+                    return
         self.log(f"本次使用：{engine}")
 
         def job():
@@ -650,7 +836,9 @@ class App:
             pend_name = ""
             if not (done.get("minutes_md") and Path(done["minutes_md"]).exists() and done.get("minutes_for") == str(tp)):
                 self.set_step(f"{engine} 整理會議記錄中")
-                raw = report.minutes(name, audio_name, tp.name, text, pending, topic, self.log, engine, confirmed)
+                pm = p_min or report.minutes_prompt(name, audio_name, tp.name, pending, topic, engine, confirmed, materials=mb)
+                self.keep_prompt(c.workdir, "會議記錄", pm, engine, len(text))
+                raw = report.minutes(name, audio_name, tp.name, text, pending, topic, self.log, engine, confirmed, prompt=pm)
                 rawp = unique_path(c.workdir / "會議記錄_原始回覆.md")
                 rawp.write_text(raw, encoding="utf-8")
                 md, pend_md, problem = report.split_minutes(raw)
@@ -681,7 +869,9 @@ class App:
                     self.log(f"PDF 已產生：{pdfp.name}")
             if topic and not (done.get("topic_md") and Path(done["topic_md"]).exists() and done.get("topic_for") == f"{tp}|{topic}"):
                 self.set_step(f"{engine} 整理專題中")
-                md2 = report.topic_report(name, topic, text, pending, self.log, engine, confirmed)
+                pt = p_top or report.topic_prompt(name, topic, pending, engine, confirmed, materials=mb)
+                self.keep_prompt(c.workdir, "專題整理", pt, engine, len(text))
+                md2 = report.topic_report(name, topic, text, pending, self.log, engine, confirmed, prompt=pt)
                 tpm = unique_path(c.outdir / f"{name}_{safe_name(topic)}_專題整理.md")
                 tpm.write_text(md2, encoding="utf-8")
                 self.save_state(c.workdir, topic_md=str(tpm), topic_for=f"{tp}|{topic}", topic_engine=engine, topic_pdf="")
@@ -695,12 +885,31 @@ class App:
                     "請檢查會議記錄", f"{engine} 的回覆格式不符（{problem}），這次沒有產生 PDF。\n"
                                      "待確認的內容可能混在會議記錄 md 裡，請檢查整理後按「重新產生 PDF」。"))
                 return
-            self.log("完成。請對照待確認清單修改會議記錄 md，再按「重新產生 PDF」；改完可按「從我的修改學習」。")
+            self.log("完成。可按「④ 修改會議記錄」對照待確認清單修改，存檔並產生 PDF。")
             where = f"「{pend_name}」" if pend_name else "待確認清單"
-            self.ui(lambda: messagebox.showinfo("完成", f"會議記錄已產生（{engine}）。\n無法確認的詞列在{where}，\n"
-                                                        "可直接編輯會議記錄 md 後按「重新產生 PDF」。\n"
-                                                        "改完後按「從我的修改學習」，下次就不用再改同樣的錯。"))
+
+            def ask_edit():
+                if messagebox.askyesno("完成", f"會議記錄已產生（{engine}）。\n無法確認的詞列在{where}。\n\n"
+                                               "要現在開啟修改畫面嗎？\n（左邊是待確認清單，可聽錄音、一鍵替換；改完按「存檔並產生 PDF」）"):
+                    self.open_editor(c)
+            self.ui(ask_edit)
         self.run_bg(job, retry=lambda: self.start_report(c))
+
+    def open_editor(self, c: SimpleNamespace = None):
+        """④ 會議記錄修改視窗（不需 VS Code）。同一場會議只開一個。"""
+        if c is None:
+            if not self.check_paths(need_audio=False):
+                return
+            c = self.ctx()
+        ed = getattr(self, "_editor", None)
+        if ed is not None and ed.win.winfo_exists() and ed.c.workdir == c.workdir:
+            ed.win.deiconify()
+            ed.win.lift()
+            return
+        import editor
+        ed = editor.EditorWindow(self, c)
+        if hasattr(ed, "win"):
+            self._editor = ed
 
     def regen_pdf(self):
         if not self.v_out.get():
@@ -864,6 +1073,14 @@ class FixWindow:
 
     def ask_ai(self):
         engine = self.app.engine
+        n_text = len(terms.to_text(self.rows))
+        mb = self.app.materials_block(self.c)          # 會議資料可當人名、名稱的正確寫法參考
+        prompt = None
+        if self.app.v_preview.get():                     # 送出前檢視
+            prompt = self.app.preview_prompt("找疑問詞", terms.terms_prompt(materials=mb), lambda t: terms.terms_prompt(t, mb), n_text, parent=self.win)
+            if prompt is None:
+                self.btn_ai.configure(state="normal", text="請 AI 找疑問詞")
+                return
         self.ai_busy = True
         self.btn_ai.configure(state="disabled", text=f"{engine} 分析中…")
         self.app.log(f"本次使用：{engine}")
@@ -871,7 +1088,9 @@ class FixWindow:
         def job():
             found = []
             try:
-                found = terms.find_suspects(self.rows, self.app.log, engine)
+                pm = prompt or terms.terms_prompt(materials=mb)
+                self.app.keep_prompt(self.c.workdir, "找疑問詞", pm, engine, n_text)
+                found = terms.find_suspects(self.rows, self.app.log, engine, prompt=pm)
             except engines.LimitError as e:
                 self.app.ui(lambda e=e: self.app.handle_limit(e, retry=lambda: self.win.winfo_exists() and self.ask_ai()))
             except Exception as e:
@@ -1196,6 +1415,9 @@ def selftest(audio: str, out: str, engine: str = "Claude Code") -> None:
         models = asr.list_models()
         log(f"錄音轉文字 v{VERSION}")
         log(f"程式位置：{Path(sys.executable).parent}")
+        rep, _ok = blocked.environment_report(engines, asr, pdf)    # 先看元件有沒有被 Windows 擋
+        for line in rep.splitlines():
+            log(line)
         log(f"找到的模型：{models or '無'}")
         if not models:
             raise RuntimeError(f"沒有語音模型，請先開啟程式下載（存放位置 {asr.user_models_dir()}）")
@@ -1226,6 +1448,9 @@ def main():
     if len(sys.argv) >= 4 and sys.argv[1] == "--檢測":
         selftest(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "全部")
         return
+    if _IMPORT_ERROR:
+        fatal(_IMPORT_ERROR)
+        return
     root = tk.Tk()
     try:
         root.tk.call("tk", "scaling", 1.25)
@@ -1235,5 +1460,28 @@ def main():
     root.mainloop()
 
 
+def fatal(text: str) -> None:
+    """啟動失敗：中文說明＋寫 log，不再是英文的 Unhandled exception 視窗。"""
+    try:
+        import blocked as B
+        title, body = B.explain(text, "程式")
+        body = body.replace("按「複製錯誤訊息」可把完整訊息傳給協助的人。", "在這個視窗按 Ctrl+C 可複製全部內容，傳給協助的人。")
+        logp = B.write_log("啟動錯誤", text)
+    except Exception:                                    # 連說明模組都載不了：給最基本的訊息
+        title, body, logp = "程式無法啟動", "請把下面的錯誤訊息傳給負責的同事。", ""
+    msg = f"{body}\n\n完整紀錄：{logp}\n\n{text.strip()[-1500:]}"
+    try:
+        r = tk.Tk()
+        r.withdraw()
+        messagebox.showerror(f"錄音轉文字 v{VERSION}：{title}", msg)
+        r.destroy()
+    except Exception:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x10)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        fatal(traceback.format_exc())

@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-VERSION = "1.2.0-beta2"   # 版本號只寫這裡；發版時改這一行（顯示在視窗標題、右下角、紀錄區與環境檢測 log）
+VERSION = "1.2.0-beta4"   # 版本號只寫這裡；發版時改這一行（顯示在視窗標題、右下角、紀錄區與環境檢測 log）
 
 
 def base_dir() -> Path:
